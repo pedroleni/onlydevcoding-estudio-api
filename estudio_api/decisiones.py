@@ -1,13 +1,24 @@
+import logging
 import sqlite3
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from estudio_api.modelos import EstadoRed
+
+logger = logging.getLogger(__name__)
 
 
 def abrir_bd(ruta: Path) -> sqlite3.Connection:
     ruta.parent.mkdir(parents=True, exist_ok=True)
     bd = sqlite3.connect(ruta)
     try:
+        version = bd.execute("PRAGMA user_version").fetchone()[0]
+        if version == 1:
+            return bd
+        if version != 0:
+            raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
+
         with bd:
             bd.execute(
                 """
@@ -118,7 +129,17 @@ def estados(
         """,
         (curso, numero),
     )
-    return {
-        (pieza, red): EstadoRed(estado=estado, fecha=fecha, url=url)
-        for pieza, red, estado, fecha, url in filas
-    }
+    resultado = {}
+    for pieza, red, estado, fecha, url in filas:
+        try:
+            resultado[(pieza, red)] = EstadoRed(estado=estado, fecha=fecha, url=url)
+        except ValidationError:
+            logger.warning(
+                "Fila de estado de red inconsistente omitida: "
+                "curso=%r numero=%r pieza=%r red=%r",
+                curso,
+                numero,
+                pieza,
+                red,
+            )
+    return resultado

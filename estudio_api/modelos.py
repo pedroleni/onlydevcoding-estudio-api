@@ -27,6 +27,11 @@ class EstadoRed(BaseModel):
     @model_validator(mode="after")
     def validar_estado(self) -> Self:
         if self.url is not None:
+            if any(
+                caracter.isspace() or ord(caracter) < 32 or ord(caracter) == 127
+                for caracter in self.url
+            ):
+                raise ValueError("La URL de publicación no es válida")
             try:
                 url = urlsplit(self.url)
                 puerto = url.port
@@ -38,6 +43,7 @@ class EstadoRed(BaseModel):
                 or url.username is not None
                 or url.password is not None
                 or puerto is not None
+                or url.netloc.endswith(":")
             ):
                 raise ValueError("La URL de publicación no está permitida")
 
