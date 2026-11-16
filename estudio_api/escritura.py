@@ -33,9 +33,17 @@ def _sincronizar_directorio(ruta: Path) -> None:
         os.close(descriptor)
 
 
-def escribir_atomico(ruta: Path, contenido: str) -> None:
+def reemplazar_atomico(ruta: Path, temporal: Path) -> None:
     _crear_copia_inicial(ruta)
+    if ruta.exists():
+        shutil.copymode(ruta, temporal)
+    with temporal.open("rb") as archivo:
+        os.fsync(archivo.fileno())
+    os.replace(temporal, ruta)
+    _sincronizar_directorio(ruta.parent)
 
+
+def escribir_atomico(ruta: Path, contenido: str) -> None:
     temporal: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -48,14 +56,11 @@ def escribir_atomico(ruta: Path, contenido: str) -> None:
         ) as archivo:
             temporal = Path(archivo.name)
             archivo.write(contenido)
-            if ruta.exists():
-                shutil.copymode(ruta, temporal)
             archivo.flush()
             os.fsync(archivo.fileno())
 
-        os.replace(temporal, ruta)
+        reemplazar_atomico(ruta, temporal)
         temporal = None
-        _sincronizar_directorio(ruta.parent)
     finally:
         if temporal is not None:
             temporal.unlink(missing_ok=True)

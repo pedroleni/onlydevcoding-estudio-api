@@ -43,6 +43,13 @@ ruta de explotación concreta.
   única copia `<archivo>.antes-de-editar`. No se escribe en `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
   contenido reales.
+- La única ejecución de procesos permitida en esta fase es la llamada concreta
+  a `herramientas/publicar/md-a-html.py` para regenerar una guía HTML. Usa
+  `sys.executable` y la ruta fija del script dentro de `ESTUDIO_DIR`, una lista
+  de argumentos, `shell=False`, un timeout de 60 segundos y `cwd` en la carpeta
+  `publicar/` validada dentro de `CURSOS_DIR`. Las rutas de entrada, salida e
+  imagen se validan dentro de esas raíces; el HTML se genera en un temporal de
+  `publicar/` y se instala de forma atómica.
 
 ## Hallazgos prioritarios
 

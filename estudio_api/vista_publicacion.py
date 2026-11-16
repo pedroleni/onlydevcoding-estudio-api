@@ -16,6 +16,7 @@ from estudio_api.publicacion import (
     Red,
     TextosRed,
     leer_publicacion,
+    portadas_candidatas,
     ruta_publica_publicar,
 )
 
@@ -71,10 +72,6 @@ def _clave_pieza(identificador: str) -> tuple[int, int]:
     return (2, int(coincidencia.group(1)))
 
 
-def _sin_duplicados(rutas: list[str]) -> list[str]:
-    return list(dict.fromkeys(rutas))
-
-
 def _ruta_json(
     config: Config,
     carpeta: Path | None,
@@ -108,14 +105,12 @@ def _construir_pieza(
     elegidas: dict[str, str],
     estados_guardados: dict[tuple[str, str], EstadoRed],
 ) -> PiezaVista:
-    portadas_json = []
-    if datos is not None:
-        portadas_json = [
-            publica
-            for portada in datos.portadas
-            if (publica := _ruta_json(config, carpeta, portada)) is not None
-        ]
-    portadas = _sin_duplicados(portadas_json + (disco.portadas if disco else []))
+    portadas = portadas_candidatas(
+        config,
+        carpeta,
+        list(disco.portadas) if disco is not None else [],
+        datos,
+    )
     elegida = elegidas.get(identificador)
 
     video_json = _ruta_json(config, carpeta, datos.video if datos else None)

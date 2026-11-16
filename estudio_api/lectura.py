@@ -604,22 +604,26 @@ def _decisiones_publicacion(
         return None, {}, None
 
     # Importación local para evitar el ciclo publicacion -> lectura -> estado.
-    from estudio_api.publicacion import leer_publicacion, ruta_publica_publicar
+    from estudio_api.publicacion import leer_publicacion, portadas_candidatas
 
     lectura = leer_publicacion(config, carpeta)
     publicacion = lectura.publicacion
     estados_guardados = estados(bd, curso, numero)
     elegidas = portadas_elegidas(bd, curso, numero)
 
-    candidatas = next(
+    portadas_disco = next(
         (list(pieza.portadas) for pieza in piezas if pieza.id == "leccion"),
         [],
     )
-    if publicacion is not None and "leccion" in publicacion.piezas and carpeta:
-        for relativa in publicacion.piezas["leccion"].portadas:
-            publica = ruta_publica_publicar(config, carpeta, relativa)
-            if publica is not None and publica not in candidatas:
-                candidatas.append(publica)
+    pieza_publicacion = (
+        publicacion.piezas.get("leccion") if publicacion is not None else None
+    )
+    candidatas = portadas_candidatas(
+        config,
+        carpeta,
+        portadas_disco,
+        pieza_publicacion,
+    )
     elegida = elegidas.get("leccion")
     miniatura = elegida if elegida in candidatas else None
     return publicacion, estados_guardados, miniatura

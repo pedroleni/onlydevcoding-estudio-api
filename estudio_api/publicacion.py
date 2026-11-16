@@ -1,6 +1,6 @@
 import re
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -165,6 +165,45 @@ def ruta_publica_publicar(
         return _ruta_publica(config.cursos_dir, "cursos", ruta)
     except OSError, ValueError:
         return None
+
+
+def portadas_candidatas(
+    config: Config,
+    carpeta: Path | None,
+    portadas_disco: list[str],
+    pieza: PiezaPublicacion | None,
+) -> list[str]:
+    portadas_json: list[str] = []
+    if carpeta is not None and pieza is not None:
+        portadas_json = [
+            publica
+            for portada in pieza.portadas
+            if (publica := ruta_publica_publicar(config, carpeta, portada)) is not None
+        ]
+    return list(dict.fromkeys(portadas_json + portadas_disco))
+
+
+def ruta_relativa_publicar(
+    config: Config,
+    carpeta: Path,
+    publica: str,
+) -> str | None:
+    publicar = _raiz_publicar(config, carpeta)
+    if publicar is None:
+        return None
+    try:
+        prefijo = PurePosixPath(
+            "cursos",
+            *publicar.relative_to(config.cursos_dir.resolve()).parts,
+        )
+        ruta_publica = PurePosixPath(publica)
+        partes = ruta_publica.relative_to(prefijo).parts
+    except ValueError:
+        return None
+    relativa = PurePosixPath(*partes).as_posix()
+    if _resolver_medio(publicar, relativa) is None:
+        return None
+    return relativa
 
 
 def _filtrar_medios(publicar: Path, publicacion: Publicacion) -> None:
