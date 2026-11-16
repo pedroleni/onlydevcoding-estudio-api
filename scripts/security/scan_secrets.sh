@@ -55,10 +55,25 @@ scan_regex CRITICAL "URL con credenciales" '(postgres(ql)?|mysql|redis|mongodb(\
 scan_regex HIGH "Ruta privada de equipo" '(/[U]sers/|/home/[^/[:space:]]+/|[A-Za-z]:\\[U]sers\\)'
 scan_regex HIGH "Email privado" '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 
+IN_GIT_REPO=false
+if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    IN_GIT_REPO=true
+fi
+
 while IFS= read -r envfile; do
-    [ -n "$envfile" ] && finding HIGH "Archivo de entorno real presente: $envfile"
-done < <(find "$PROJECT_ROOT" -maxdepth 2 -type f \
-    \( -name '.env' -o -name '.env.local' -o -name '.env.production' \) \
+    [ -z "$envfile" ] && continue
+    if [ "$IN_GIT_REPO" = true ]; then
+        relative_envfile="${envfile#"$PROJECT_ROOT"/}"
+        if ! git -C "$PROJECT_ROOT" ls-files --error-unmatch -- "$relative_envfile" \
+                >/dev/null 2>&1 \
+            && ! git -C "$PROJECT_ROOT" diff --cached --name-only -- \
+                "$relative_envfile" | grep -Fxq -- "$relative_envfile"; then
+            continue
+        fi
+    fi
+    finding HIGH "Archivo de entorno real presente: $envfile"
+done < <(find "$PROJECT_ROOT" -maxdepth 2 -type f -name '.env*' \
+    ! -name '.env.example' \
     -not -path '*/.venv/*' -not -path '*/.git/*' 2>/dev/null)
 
 if [ ! -f "$PROJECT_ROOT/.gitignore" ] || ! grep -Eq '^\.env([[:space:]]|$)' "$PROJECT_ROOT/.gitignore"; then
