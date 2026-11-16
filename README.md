@@ -18,5 +18,6 @@ La web permitida se puede cambiar mediante `ORIGEN_WEB`; por defecto es
 ## Arranque
 
 ```sh
-uv run uvicorn estudio_api.app:app --host 127.0.0.1 --port 8000
+uv run uvicorn --factory estudio_api.app:crear_app_desde_entorno \
+  --host 127.0.0.1 --port 8000
 ```

@@ -18,20 +18,47 @@ class SeguridadLocalMiddleware:
         self.origen_web = origen_web
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        tipo_scope = scope["type"]
+        if tipo_scope not in {"http", "websocket"}:
             await self.app(scope, receive, send)
             return
 
         cabeceras = Headers(scope=scope)
         if cabeceras.get("host") not in HOSTS_PERMITIDOS:
-            respuesta = PlainTextResponse("Host no permitido", status_code=400)
-            await respuesta(scope, receive, send)
+            await self._rechazar(
+                scope,
+                receive,
+                send,
+                mensaje="Host no permitido",
+                estado=400,
+            )
             return
 
         origen = cabeceras.get("origin")
         if origen is not None and origen != self.origen_web:
-            respuesta = PlainTextResponse("Origen no permitido", status_code=403)
-            await respuesta(scope, receive, send)
+            await self._rechazar(
+                scope,
+                receive,
+                send,
+                mensaje="Origen no permitido",
+                estado=403,
+            )
             return
 
         await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _rechazar(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        *,
+        mensaje: str,
+        estado: int,
+    ) -> None:
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+
+        respuesta = PlainTextResponse(mensaje, status_code=estado)
+        await respuesta(scope, receive, send)
