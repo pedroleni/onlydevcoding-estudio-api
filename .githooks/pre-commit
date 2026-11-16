@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Gate local: bloquea commits con secretos o datos privados CRITICAL/HIGH.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+echo "Ejecutando escaneo de secretos..."
+bash scripts/security/scan_secrets.sh .
+
