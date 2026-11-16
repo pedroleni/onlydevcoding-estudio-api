@@ -28,14 +28,33 @@ def test_medio_completo(cliente):
     assert respuesta.headers["accept-ranges"] == "bytes"
     assert respuesta.headers["content-type"] == "video/mp4"
     assert respuesta.headers["content-length"] == "16"
+    assert respuesta.headers["cross-origin-resource-policy"] == "same-site"
+
+
+def test_medio_rechaza_sec_fetch_site_cross_site(cliente):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Sec-Fetch-Site": "cross-site"},
+    )
+
+    assert respuesta.status_code == 403
+
+
+def test_medio_acepta_sec_fetch_site_same_site(cliente):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Sec-Fetch-Site": "same-site"},
+    )
+
+    assert respuesta.status_code == 200
 
 
 def test_extension_permitida_insensible_a_mayusculas(cliente):
     respuesta = cliente.get(
         "/api/medios",
-        params={
-            "ruta": "cursos/REACT/04-importar-y-exportar/previa/fotograma.JPEG"
-        },
+        params={"ruta": "cursos/REACT/04-importar-y-exportar/previa/fotograma.JPEG"},
     )
 
     assert respuesta.status_code == 200

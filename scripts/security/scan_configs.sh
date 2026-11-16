@@ -35,9 +35,11 @@ if [ -d "$PROJECT_ROOT/.github/workflows" ]; then
         if grep -q 'pull_request_target' "$workflow"; then
             finding CRITICAL "$workflow usa pull_request_target."
         fi
-        if grep -Eq 'permissions:[[:space:]]*write-all' "$workflow"; then
+        if grep -Eq '^[[:space:]]*permissions:[[:space:]]*write-all([[:space:]]*(#.*)?)?$' "$workflow"; then
             finding HIGH "$workflow concede write-all."
         fi
+        write_permissions=$(grep -En '^[[:space:]]*[A-Za-z0-9_-]+:[[:space:]]*write([[:space:]]*(#.*)?)?$' "$workflow" || true)
+        [ -z "$write_permissions" ] || finding HIGH "$workflow concede permisos de escritura: $write_permissions"
         while IFS= read -r ref; do
             [ -z "$ref" ] && continue
             ref=$(printf '%s' "$ref" | sed -E 's/[[:space:]]*#.*$//')
@@ -45,7 +47,7 @@ if [ -d "$PROJECT_ROOT/.github/workflows" ]; then
             if ! printf '%s' "$version" | grep -Eq '^[0-9a-f]{40}$'; then
                 finding HIGH "$workflow usa una acción sin SHA de 40 caracteres: $ref"
             fi
-        done < <(grep -E '^[[:space:]]*-[[:space:]]+uses:' "$workflow" | sed -E 's/.*uses:[[:space:]]*//' || true)
+        done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*' "$workflow" | sed -E 's/.*uses:[[:space:]]*//' || true)
     done < <(find "$PROJECT_ROOT/.github/workflows" -type f \( -name '*.yml' -o -name '*.yaml' \) -print)
 fi
 

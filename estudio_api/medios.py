@@ -41,7 +41,7 @@ def _resolver_ruta(config: Config, ruta_publica: str) -> Path | None:
     try:
         ruta = ruta_segura(raiz, *partes[1:])
         datos = ruta.stat()
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if ruta.suffix.lower() not in TIPOS_MEDIO or not stat.S_ISREG(datos.st_mode):
         return None
@@ -111,9 +111,7 @@ def servir_medio(
 
     cabeceras = {"Accept-Ranges": "bytes"}
     rango = (
-        None
-        if cabecera_range is None
-        else _rango_solicitado(cabecera_range, tamano)
+        None if cabecera_range is None else _rango_solicitado(cabecera_range, tamano)
     )
     if rango is None:
         inicio = 0

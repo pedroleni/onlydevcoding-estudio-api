@@ -133,12 +133,7 @@ def test_sin_carpeta(cfg):
 
 def test_video_final_sin_mp4_es_falso(cfg):
     carpeta = _carpeta_leccion(cfg)
-    video = (
-        carpeta
-        / "publicar"
-        / "1-youtube-leccion"
-        / "curso-react-04-ejemplo.mp4"
-    )
+    video = carpeta / "publicar" / "1-youtube-leccion" / "curso-react-04-ejemplo.mp4"
     video.unlink()
 
     estado = calcular_estado(cfg, "react", 4, carpeta, None)

@@ -20,12 +20,12 @@
 
 ## Global Constraints
 
-- Local, sin autenticación. API en `127.0.0.1:8000`; web en `localhost:3000`.
+- Local, sin autenticación. API en `127.0.0.1:8000`; web en `127.0.0.1:3000`.
 - Repos públicos `pedroleni/onlydevcoding-estudio-api` y `pedroleni/onlydevcoding-estudio-web`.
 - **Nada privado en los repos**: ni rutas absolutas del Mac, ni emails, ni tomas, ni textos de lecciones. Los tests usan datos falsos creados en `tmp_path`. Las rutas reales solo en `.env` (ignorado); `.env.example` con valores de ejemplo.
 - La fase 1 **no escribe** en `CURSOS_DIR` ni en `ESTUDIO_DIR`.
 - Toda ruta que la API abra se resuelve dentro de una de las dos raíces (sin `..`, sin enlaces que salgan); ids de curso `^[a-z0-9-]{1,40}$`, número de lección entero 1–999.
-- Solo se aceptan peticiones con `Host` `127.0.0.1:8000` o `localhost:8000`; las de navegador con `Origin` distinto de `ORIGEN_WEB` (por defecto `http://localhost:3000`) se rechazan con 403.
+- Solo se aceptan peticiones con `Host` `127.0.0.1:8000` o `localhost:8000`; las de navegador con `Origin` distinto de `ORIGEN_WEB` (por defecto `http://127.0.0.1:3000`) se rechazan con 403. Web y API usan `127.0.0.1` para pertenecer al mismo sitio.
 - Dependencias fijadas con lockfile (`uv.lock`, `package-lock.json`).
 - Textos de la interfaz en castellano de España. Tema oscuro: fondo `#141416`, superficie `#1E1E21`, borde `#313136`, texto `#F5F5F6`, tenue `#8E8E98`, azul de marca `#299BC6`, carbón `#28272A`.
 - Redes, en este orden: YouTube, Instagram, TikTok, LinkedIn.
@@ -52,7 +52,7 @@
 
 **Interfaces:**
 - Produces:
-  - `class Config(BaseModel): cursos_dir: Path; estudio_dir: Path; origen_web: str = "http://localhost:3000"`
+  - `class Config(BaseModel): cursos_dir: Path; estudio_dir: Path; origen_web: str = "http://127.0.0.1:3000"`
   - `def cargar_config() -> Config` (lee `CURSOS_DIR`, `ESTUDIO_DIR`, `ORIGEN_WEB` de entorno / `.env`; falla con mensaje claro si faltan o no existen)
   - `def crear_app(config: Config) -> FastAPI` (con el middleware de `seguridad.py` y `GET /api/salud` → `{"ok": true}`)
   - Arranque: `uv run uvicorn estudio_api.app:app --host 127.0.0.1 --port 8000`
@@ -64,11 +64,33 @@ git clone … && cd onlydevcoding-estudio-api && git commit --allow-empty -m "In
 ```
 - [ ] **Step 2: Tests que fallan** en `tests/test_app.py`:
 ```python
-def test_salud(cliente): assert cliente.get("/api/salud").json() == {"ok": True}
-def test_host_ajeno_rechazado(cliente): assert cliente.get("/api/salud", headers={"Host": "evil.com"}).status_code == 400
-def test_origen_ajeno_rechazado(cliente): assert cliente.get("/api/salud", headers={"Origin": "https://evil.com"}).status_code == 403
-def test_origen_web_aceptado(cliente): assert cliente.get("/api/salud", headers={"Origin": "http://localhost:3000"}).status_code == 200
-def test_config_sin_rutas_falla(monkeypatch): ...  # sin CURSOS_DIR → ValueError con «CURSOS_DIR»
+def test_salud(cliente):
+    assert cliente.get("/api/salud").json() == {"ok": True}
+
+
+def test_host_ajeno_rechazado(cliente):
+    assert cliente.get("/api/salud", headers={"Host": "evil.com"}).status_code == 400
+
+
+def test_origen_ajeno_rechazado(cliente):
+    assert (
+        cliente.get("/api/salud", headers={"Origin": "https://evil.com"}).status_code
+        == 403
+    )
+
+
+def test_origen_web_aceptado(cliente):
+    assert (
+        cliente.get(
+            "/api/salud", headers={"Origin": "http://127.0.0.1:3000"}
+        ).status_code
+        == 200
+    )
+
+
+def test_config_sin_rutas_falla(
+    monkeypatch,
+): ...  # sin CURSOS_DIR → ValueError con «CURSOS_DIR»
 ```
 (`cliente` = fixture con `TestClient(crear_app(Config(cursos_dir=tmp, estudio_dir=tmp)), base_url="http://127.0.0.1:8000")`.)
 - [ ] **Step 3:** `uv run pytest -q` → FAIL.
@@ -121,12 +143,37 @@ def test_config_sin_rutas_falla(monkeypatch): ...  # sin CURSOS_DIR → ValueErr
 
 - [ ] **Step 1: Tests que fallan** (`tests/test_lectura.py`), con una fábrica que crea en `tmp_path` un curso `REACT` con `04-importar-y-exportar` (guion falso con E01 cámara, E03 voz, montaje con fps 30), carpetas `Asset/` y `Fondos/` sin lecciones, y una lección `05-otra` sin guion:
 ```python
-def test_solo_cursos_con_lecciones(cfg): assert [c.id for c in leer_cursos(cfg)] == ["react"]
-def test_leccion_sin_guion_aparece(cfg): assert [l.numero for l in leer_lecciones(cfg, "react")] == [4, 5]
-def test_escenas_con_tiempos(cfg): e = leer_leccion(cfg, "react", 4).escenas; assert (e[1].id, e[1].inicio_s) == ("E03", 2.0)
-def test_piezas(cfg): assert [p.tipo for p in leer_leccion(cfg, "react", 4).piezas] == ["leccion", "reel", "short"]
-def test_ignora_anteriores(cfg): assert all("anterior" not in p.video for p in leer_leccion(cfg, "react", 4).piezas if p.video)
-def test_ruta_segura_rechaza_salida(tmp_path): pytest.raises(ValueError, ruta_segura, tmp_path, "../x")
+def test_solo_cursos_con_lecciones(cfg):
+    assert [c.id for c in leer_cursos(cfg)] == ["react"]
+
+
+def test_leccion_sin_guion_aparece(cfg):
+    assert [l.numero for l in leer_lecciones(cfg, "react")] == [4, 5]
+
+
+def test_escenas_con_tiempos(cfg):
+    e = leer_leccion(cfg, "react", 4).escenas
+    assert (e[1].id, e[1].inicio_s) == ("E03", 2.0)
+
+
+def test_piezas(cfg):
+    assert [p.tipo for p in leer_leccion(cfg, "react", 4).piezas] == [
+        "leccion",
+        "reel",
+        "short",
+    ]
+
+
+def test_ignora_anteriores(cfg):
+    assert all(
+        "anterior" not in p.video
+        for p in leer_leccion(cfg, "react", 4).piezas
+        if p.video
+    )
+
+
+def test_ruta_segura_rechaza_salida(tmp_path):
+    pytest.raises(ValueError, ruta_segura, tmp_path, "../x")
 ```
 - [ ] **Step 2:** `uv run pytest tests/test_lectura.py -q` → FAIL.
 - [ ] **Step 3:** Implementar según las reglas.
@@ -146,10 +193,22 @@ def test_ruta_segura_rechaza_salida(tmp_path): pytest.raises(ValueError, ruta_se
 
 - [ ] **Step 1: Tests que fallan:**
 ```python
-def test_voz_parcial(cfg): assert calcular_estado(...).voz == Avance(hechas=1, total=2)
+def test_voz_parcial(cfg):
+    assert calcular_estado(...).voz == Avance(hechas=1, total=2)
+
+
 def test_camara_desde_ia(cfg): ...  # toma solo en videos/ia → cuenta como hecha
-def test_sin_carpeta(cfg): assert calcular_estado(cfg, "react", None, guion).video_final is False
-def test_redes(cfg): assert list(calcular_estado(...).publicado) == ["youtube", "instagram", "tiktok", "linkedin"]
+def test_sin_carpeta(cfg):
+    assert calcular_estado(cfg, "react", None, guion).video_final is False
+
+
+def test_redes(cfg):
+    assert list(calcular_estado(...).publicado) == [
+        "youtube",
+        "instagram",
+        "tiktok",
+        "linkedin",
+    ]
 ```
 - [ ] **Step 2:** FAIL. **Step 3:** Implementar. **Step 4:** PASS. **Step 5: Commit** `Estado de la lección calculado desde el disco`.
 
@@ -168,12 +227,39 @@ def test_redes(cfg): assert list(calcular_estado(...).publicado) == ["youtube", 
   - `GET /api/medios?ruta=<prefijo>/<relativa>` → archivo, con `Range` (206 + `Content-Range`) y `Accept-Ranges: bytes`. Extensiones permitidas: `.mp4 .mov .wav .jpg .jpeg .png`. Cualquier otra cosa o ruta fuera de raíz → 404.
 - [ ] **Step 1: Tests que fallan:**
 ```python
-def test_cursos(cliente): assert cliente.get("/api/cursos").json()[0]["id"] == "react"
-def test_leccion_404(cliente): assert cliente.get("/api/cursos/react/lecciones/99").status_code == 404
-def test_curso_invalido(cliente): assert cliente.get("/api/cursos/..%2Fx/lecciones").status_code in (404, 422)
-@pytest.mark.parametrize("ruta", ["cursos/../../etc/passwd", "/etc/passwd", "cursos/REACT/.env", "estudio/lecciones/react-04.json", "cursos/enlace-fuera.mp4"])
-def test_medios_prohibidos(cliente, ruta): assert cliente.get("/api/medios", params={"ruta": ruta}).status_code == 404
-def test_medios_range(cliente): r = cliente.get("/api/medios", params={"ruta": "cursos/REACT/04-importar-y-exportar/previa/previa-v1.mp4"}, headers={"Range": "bytes=0-9"}); assert (r.status_code, len(r.content)) == (206, 10)
+def test_cursos(cliente):
+    assert cliente.get("/api/cursos").json()[0]["id"] == "react"
+
+
+def test_leccion_404(cliente):
+    assert cliente.get("/api/cursos/react/lecciones/99").status_code == 404
+
+
+def test_curso_invalido(cliente):
+    assert cliente.get("/api/cursos/..%2Fx/lecciones").status_code in (404, 422)
+
+
+@pytest.mark.parametrize(
+    "ruta",
+    [
+        "cursos/../../etc/passwd",
+        "/etc/passwd",
+        "cursos/REACT/.env",
+        "estudio/lecciones/react-04.json",
+        "cursos/enlace-fuera.mp4",
+    ],
+)
+def test_medios_prohibidos(cliente, ruta):
+    assert cliente.get("/api/medios", params={"ruta": ruta}).status_code == 404
+
+
+def test_medios_range(cliente):
+    r = cliente.get(
+        "/api/medios",
+        params={"ruta": "cursos/REACT/04-importar-y-exportar/previa/previa-v1.mp4"},
+        headers={"Range": "bytes=0-9"},
+    )
+    assert (r.status_code, len(r.content)) == (206, 10)
 ```
 (`enlace-fuera.mp4` = enlace simbólico creado en el fixture que apunta fuera de `tmp_path`.)
 - [ ] **Step 2:** FAIL. **Step 3:** Implementar (`FileResponse` no sirve `Range`: leer el trozo con `open`/`seek` y `StreamingResponse`). **Step 4:** PASS.

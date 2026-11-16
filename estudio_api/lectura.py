@@ -18,7 +18,7 @@ from estudio_api.modelos import (
 from estudio_api.rutas import ruta_segura
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
-PATRON_CARPETA_LECCION = re.compile(r"^(\d{2})-(.+)$")
+PATRON_CARPETA_LECCION = re.compile(r"^(\d{2,3})-(.+)$")
 PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 PATRON_SHORT = re.compile(r"^short-(\d+)(?:-.+)?\.mp4$", re.IGNORECASE)
 MAX_TAMANO_JSON = 5 * 1024 * 1024
@@ -42,7 +42,7 @@ def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
         try:
             relativa = directorio.resolve().relative_to(raiz_resuelta)
             entradas.append(ruta_segura(raiz_resuelta, *relativa.parts, nombre))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return entradas
 
@@ -53,7 +53,7 @@ def _leer_json(ruta: Path) -> dict[str, Any] | None:
             if os.fstat(archivo.fileno()).st_size > MAX_TAMANO_JSON:
                 return None
             datos = json.load(archivo)
-    except (OSError, UnicodeError, RecursionError, ValueError):
+    except OSError, UnicodeError, RecursionError, ValueError:
         return None
     return datos if isinstance(datos, dict) else None
 
@@ -296,7 +296,7 @@ def _numero_finito_positivo(
         return None
     try:
         numero = float(valor)
-    except (OverflowError, ValueError):
+    except OverflowError, ValueError:
         return None
     if not math.isfinite(numero) or numero <= 0 or numero < minimo:
         return None
@@ -310,11 +310,7 @@ def _duracion_en_segundos(valor: object, fps: float) -> float | None:
     if fotogramas is None:
         return None
     segundos = fotogramas / fps
-    if (
-        not math.isfinite(segundos)
-        or segundos <= 0
-        or segundos > MAX_DURACION_SEGUNDOS
-    ):
+    if not math.isfinite(segundos) or segundos <= 0 or segundos > MAX_DURACION_SEGUNDOS:
         return None
     return segundos
 
@@ -488,10 +484,10 @@ def _piezas(
             )
             portadas_por_reel[reel].append(portada)
 
-    for ruta in reels:
+    for indice, ruta in enumerate(reels, start=1):
         piezas.append(
             Pieza(
-                id=ruta.stem,
+                id=("reel-salida" if len(reels) == 1 else f"reel-salida-{indice}"),
                 tipo="reel",
                 titulo=ruta.stem.replace("-", " ").capitalize(),
                 video=_ruta_publica(config.cursos_dir, "cursos", ruta),

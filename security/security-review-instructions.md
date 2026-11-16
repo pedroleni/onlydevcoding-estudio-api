@@ -19,7 +19,10 @@ ruta de explotación concreta.
   un hallazgo HIGH.
 - Los únicos hosts son `127.0.0.1:8000` y `localhost:8000`. Validar `Host`
   mitiga DNS rebinding. `Origin`, cuando exista, debe coincidir exactamente con
-  `ORIGEN_WEB` (por defecto `http://localhost:3000`).
+  `ORIGEN_WEB` (por defecto `http://127.0.0.1:3000`). La web también se abre en
+  `127.0.0.1` para compartir sitio con la API. Toda petición HTTP marcada por el
+  navegador con `Sec-Fetch-Site: cross-site` se rechaza y `/api/medios` envía
+  `Cross-Origin-Resource-Policy: same-site`.
 - CORS no sustituye las comprobaciones de `Host` y `Origin`.
 - La fase 1 es de solo lectura en `CURSOS_DIR` y `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
@@ -53,4 +56,3 @@ ruta de explotación concreta.
 Solo se publican CRITICAL, HIGH y MEDIUM. Una auditoría completa añade resumen,
 prioridad de remediación y risk score:
 `CRITICAL×25 + HIGH×10 + MEDIUM×3 + LOW×1` (máximo 100).
-

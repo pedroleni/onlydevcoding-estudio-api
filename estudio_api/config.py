@@ -8,7 +8,7 @@ from pydantic import BaseModel
 class Config(BaseModel):
     cursos_dir: Path
     estudio_dir: Path
-    origen_web: str = "http://localhost:3000"
+    origen_web: str = "http://127.0.0.1:3000"
 
 
 def _valor_config(nombre: str, archivo_env: dict[str, str | None]) -> str | None:
@@ -35,9 +35,7 @@ def cargar_config() -> Config:
     archivo_env = dict(dotenv_values(".env"))
     cursos_dir = _directorio_configurado("CURSOS_DIR", archivo_env)
     estudio_dir = _directorio_configurado("ESTUDIO_DIR", archivo_env)
-    origen_web = (
-        _valor_config("ORIGEN_WEB", archivo_env) or "http://localhost:3000"
-    )
+    origen_web = _valor_config("ORIGEN_WEB", archivo_env) or "http://127.0.0.1:3000"
     return Config(
         cursos_dir=cursos_dir,
         estudio_dir=estudio_dir,

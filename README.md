@@ -13,7 +13,10 @@ cp .env.example .env
 ```
 
 La web permitida se puede cambiar mediante `ORIGEN_WEB`; por defecto es
-`http://localhost:3000`.
+`http://127.0.0.1:3000`. La web y la API deben abrirse ambas mediante
+`127.0.0.1` para pertenecer al mismo sitio. Así, los medios pueden responder con
+`Cross-Origin-Resource-Policy: same-site`; además, la API rechaza las peticiones
+que el navegador marque con `Sec-Fetch-Site: cross-site`.
 
 ## Arranque
 

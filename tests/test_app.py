@@ -57,9 +57,7 @@ def test_peticion_sin_host_rechazada(cliente):
     mensajes = asyncio.run(ejecutar_peticion())
 
     inicio_respuesta = next(
-        mensaje
-        for mensaje in mensajes
-        if mensaje["type"] == "http.response.start"
+        mensaje for mensaje in mensajes if mensaje["type"] == "http.response.start"
     )
     assert inicio_respuesta["status"] == 400
 
@@ -91,7 +89,7 @@ def test_origen_ajeno_rechazado(cliente):
 def test_origen_web_aceptado(cliente):
     respuesta = cliente.get(
         "/api/salud",
-        headers={"Origin": "http://localhost:3000"},
+        headers={"Origin": "http://127.0.0.1:3000"},
     )
 
     assert respuesta.status_code == 200
@@ -101,16 +99,13 @@ def test_preflight_origen_web_aceptado(cliente):
     respuesta = cliente.options(
         "/api/salud",
         headers={
-            "Origin": "http://localhost:3000",
+            "Origin": "http://127.0.0.1:3000",
             "Access-Control-Request-Method": "GET",
         },
     )
 
     assert respuesta.status_code == 200
-    assert (
-        respuesta.headers["access-control-allow-origin"]
-        == "http://localhost:3000"
-    )
+    assert respuesta.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
 
 
 def test_preflight_origen_ajeno_rechazado(cliente):
@@ -150,3 +145,9 @@ def test_config_sin_rutas_falla(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="CURSOS_DIR"):
         cargar_config()
+
+
+def test_origen_web_por_defecto_usa_127_0_0_1(tmp_path):
+    config = Config(cursos_dir=tmp_path, estudio_dir=tmp_path)
+
+    assert config.origen_web == "http://127.0.0.1:3000"

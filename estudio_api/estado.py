@@ -21,7 +21,7 @@ def _ruta_de_leccion(
     try:
         relativa = carpeta.resolve().relative_to(config.cursos_dir.resolve())
         return ruta_segura(config.cursos_dir, *relativa.parts, *partes)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -144,7 +144,9 @@ def _ultima_previa(config: Config, carpeta: Path | None) -> str | None:
     ultima = max(versiones, key=lambda version: version[0])[1]
     relativa = ultima.relative_to(config.cursos_dir.resolve())
     segura = ruta_segura(config.cursos_dir, *relativa.parts)
-    return PurePosixPath("cursos", *segura.relative_to(config.cursos_dir.resolve()).parts).as_posix()
+    return PurePosixPath(
+        "cursos", *segura.relative_to(config.cursos_dir.resolve()).parts
+    ).as_posix()
 
 
 def calcular_estado(

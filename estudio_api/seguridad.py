@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 AplicacionASGI = Callable[
     [Scope, Receive, Send],
@@ -10,6 +10,8 @@ AplicacionASGI = Callable[
 ]
 
 HOSTS_PERMITIDOS = {"127.0.0.1:8000", "localhost:8000"}
+RUTA_MEDIOS = "/api/medios"
+CORP_SAME_SITE = (b"cross-origin-resource-policy", b"same-site")
 
 
 class SeguridadLocalMiddleware:
@@ -24,11 +26,25 @@ class SeguridadLocalMiddleware:
             return
 
         cabeceras = Headers(scope=scope)
+        enviar = send
+        if tipo_scope == "http" and scope.get("path") == RUTA_MEDIOS:
+
+            async def enviar_con_corp(mensaje: Message) -> None:
+                if mensaje["type"] == "http.response.start":
+                    mensaje = dict(mensaje)
+                    mensaje["headers"] = [
+                        *mensaje.get("headers", []),
+                        CORP_SAME_SITE,
+                    ]
+                await send(mensaje)
+
+            enviar = enviar_con_corp
+
         if cabeceras.get("host") not in HOSTS_PERMITIDOS:
             await self._rechazar(
                 scope,
                 receive,
-                send,
+                enviar,
                 mensaje="Host no permitido",
                 estado=400,
             )
@@ -39,13 +55,26 @@ class SeguridadLocalMiddleware:
             await self._rechazar(
                 scope,
                 receive,
-                send,
+                enviar,
                 mensaje="Origen no permitido",
                 estado=403,
             )
             return
 
-        await self.app(scope, receive, send)
+        if (
+            tipo_scope == "http"
+            and cabeceras.get("sec-fetch-site", "").casefold() == "cross-site"
+        ):
+            await self._rechazar(
+                scope,
+                receive,
+                enviar,
+                mensaje="Sitio de origen no permitido",
+                estado=403,
+            )
+            return
+
+        await self.app(scope, receive, enviar)
 
     @staticmethod
     async def _rechazar(

@@ -21,6 +21,14 @@ def test_leccion_sin_guion_aparece(cfg):
     assert lecciones[1].slug == "otra"
 
 
+def test_leccion_con_numero_de_tres_cifras_aparece(cfg):
+    (cfg.cursos_dir / "REACT" / "100-ejemplo-ficticio").mkdir()
+
+    lecciones = leer_lecciones(cfg, "react")
+
+    assert 100 in [leccion.numero for leccion in lecciones]
+
+
 def test_guion_sin_carpeta_aparece(cfg):
     guion = {
         "ficha": "React",
@@ -86,13 +94,7 @@ def test_json_mayor_de_cinco_mb_no_se_lee(tmp_path, monkeypatch):
 
 
 def test_leccion_sin_montaje_no_rompe(cfg):
-    montaje = (
-        cfg.estudio_dir
-        / "public"
-        / "lecciones"
-        / "react-04"
-        / "montaje.json"
-    )
+    montaje = cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
     montaje.unlink()
 
     leccion = leer_leccion(cfg, "react", 4)
@@ -112,7 +114,9 @@ def test_leccion_sin_montaje_no_rompe(cfg):
 def test_enlace_de_curso_que_apunta_fuera_se_ignora(cfg, tmp_path):
     curso_fuera = tmp_path / "fuera" / "MALICIOSO" / "01-secreto"
     curso_fuera.mkdir(parents=True)
-    (cfg.cursos_dir / "MALICIOSO").symlink_to(curso_fuera.parent, target_is_directory=True)
+    (cfg.cursos_dir / "MALICIOSO").symlink_to(
+        curso_fuera.parent, target_is_directory=True
+    )
 
     cursos = leer_cursos(cfg)
 
@@ -156,9 +160,7 @@ def test_escenas_con_textos_y_tiempos(cfg):
     [float("inf"), float("nan"), 0, -1, 0.000_001, 1001],
 )
 def test_fps_no_finito_o_absurdo_se_trata_como_desconocido(cfg, fps):
-    montaje = (
-        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
-    )
+    montaje = cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
     datos = json.loads(montaje.read_text(encoding="utf-8"))
     datos["fps"] = fps
     montaje.write_text(json.dumps(datos), encoding="utf-8")
@@ -175,12 +177,8 @@ def test_fps_no_finito_o_absurdo_se_trata_como_desconocido(cfg, fps):
     "duracion",
     [float("inf"), float("nan"), 0, -1, 10**20],
 )
-def test_duracion_no_finita_o_absurda_se_trata_como_desconocida(
-    cfg, duracion
-):
-    montaje = (
-        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
-    )
+def test_duracion_no_finita_o_absurda_se_trata_como_desconocida(cfg, duracion):
+    montaje = cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
     datos = json.loads(montaje.read_text(encoding="utf-8"))
     datos["duracion"] = duracion
     montaje.write_text(json.dumps(datos), encoding="utf-8")
@@ -193,9 +191,7 @@ def test_duracion_no_finita_o_absurda_se_trata_como_desconocida(
 
 
 def test_duracion_de_escena_no_finita_se_trata_como_desconocida(cfg):
-    montaje = (
-        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
-    )
+    montaje = cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
     datos = json.loads(montaje.read_text(encoding="utf-8"))
     datos["escenas"][1]["duracion"] = float("inf")
     montaje.write_text(json.dumps(datos), encoding="utf-8")
@@ -223,6 +219,47 @@ def test_piezas_y_portadas(cfg):
     assert all(ruta.startswith("cursos/") for ruta in leccion.piezas[2].portadas)
 
 
+def test_ids_estables_de_leccion_reel_unico_y_short(cfg):
+    verticales = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "2-shorts-y-reels"
+    )
+    (verticales / "short-2-ejemplo.mp4").rename(
+        verticales / "short-3-contenido-inventado.mp4"
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert [pieza.id for pieza in leccion.piezas] == [
+        "leccion",
+        "reel-salida",
+        "short-3",
+    ]
+
+
+def test_renombrar_reel_unico_no_cambia_su_id(cfg):
+    verticales = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "2-shorts-y-reels"
+    )
+    (verticales / "reel-salida.mp4").rename(
+        verticales / "reel-nombre-completamente-inventado.mp4"
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    reel = next(pieza for pieza in leccion.piezas if pieza.tipo == "reel")
+    assert reel.id == "reel-salida"
+    assert reel.video.endswith("/reel-nombre-completamente-inventado.mp4")
+
+
 def test_reel_unico_recibe_portadas_aunque_no_coincidan_los_nombres(cfg):
     verticales = (
         cfg.cursos_dir
@@ -232,14 +269,14 @@ def test_reel_unico_recibe_portadas_aunque_no_coincidan_los_nombres(cfg):
         / "2-shorts-y-reels"
     )
     (verticales / "reel-salida.mp4").unlink()
-    (verticales / "reel-nueva-leccion-4-pagina-en-blanco.mp4").write_bytes(b"reel")
-    (verticales / "portada-reel-nueva-leccion-4-caja.jpg").write_bytes(b"portada")
+    (verticales / "reel-planeta-naranja.mp4").write_bytes(b"reel")
+    (verticales / "portada-reel-planeta-marco.jpg").write_bytes(b"portada")
 
     leccion = leer_leccion(cfg, "react", 4)
 
     reel = next(pieza for pieza in leccion.piezas if pieza.tipo == "reel")
     assert [ruta.rsplit("/", 1)[-1] for ruta in reel.portadas] == [
-        "portada-reel-nueva-leccion-4-caja.jpg"
+        "portada-reel-planeta-marco.jpg"
     ]
 
 
@@ -252,14 +289,10 @@ def test_varios_reels_reparten_portadas_por_prefijo_comun_mas_largo(cfg):
         / "2-shorts-y-reels"
     )
     (verticales / "reel-salida.mp4").unlink()
-    (verticales / "reel-ya-esta-la-leccion-2.mp4").write_bytes(b"reel A")
-    (verticales / "reel-nueva-leccion-2.mp4").write_bytes(b"reel B")
-    (verticales / "portada-reel-ya-esta-la-leccion-2-A-para.jpg").write_bytes(
-        b"portada A"
-    )
-    (verticales / "portada-reel-nueva-leccion-2-B-caja.jpg").write_bytes(
-        b"portada B"
-    )
+    (verticales / "reel-bosque-azul.mp4").write_bytes(b"reel A")
+    (verticales / "reel-planeta-rojo.mp4").write_bytes(b"reel B")
+    (verticales / "portada-reel-bosque-azul-A-marco.jpg").write_bytes(b"portada A")
+    (verticales / "portada-reel-planeta-rojo-B-circulo.jpg").write_bytes(b"portada B")
 
     leccion = leer_leccion(cfg, "react", 4)
 
@@ -269,10 +302,8 @@ def test_varios_reels_reparten_portadas_por_prefijo_comun_mas_largo(cfg):
         if pieza.tipo == "reel"
     }
     assert reels == {
-        "reel-nueva-leccion-2": ["portada-reel-nueva-leccion-2-B-caja.jpg"],
-        "reel-ya-esta-la-leccion-2": [
-            "portada-reel-ya-esta-la-leccion-2-A-para.jpg"
-        ],
+        "reel-salida-1": ["portada-reel-bosque-azul-A-marco.jpg"],
+        "reel-salida-2": ["portada-reel-planeta-rojo-B-circulo.jpg"],
     }
 
 
