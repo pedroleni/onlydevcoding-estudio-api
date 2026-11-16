@@ -28,7 +28,9 @@ def test_medio_completo(cliente):
     assert respuesta.headers["accept-ranges"] == "bytes"
     assert respuesta.headers["content-type"] == "video/mp4"
     assert respuesta.headers["content-length"] == "16"
-    assert respuesta.headers["cross-origin-resource-policy"] == "same-site"
+    # Sin CORP: Chromium bloquea same-site entre 127.0.0.1:3000 y 127.0.0.1:8000.
+    # La protección contra otras webs es el rechazo de Sec-Fetch-Site: cross-site.
+    assert "cross-origin-resource-policy" not in respuesta.headers
 
 
 def test_medio_rechaza_sec_fetch_site_cross_site(cliente):

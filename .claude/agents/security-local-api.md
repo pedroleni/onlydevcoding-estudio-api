@@ -18,9 +18,11 @@ autenticación: es una decisión explícita.
 3. **Origin, sitio y CSRF:** toda petición de navegador con `Origin` distinto de
    `ORIGEN_WEB` recibe 403 y toda petición HTTP con `Sec-Fetch-Site: cross-site`
    se rechaza. `ORIGEN_WEB` es por defecto `http://127.0.0.1:3000`: web y API
-   usan `127.0.0.1` para ser del mismo sitio. Los medios responden con
-   `Cross-Origin-Resource-Policy: same-site`. CORS es una capa adicional, no el
-   control único.
+   usan `127.0.0.1` para ser del mismo sitio. No se envía
+   `Cross-Origin-Resource-Policy: same-site` (Chromium bloquea con ella los
+   medios entre los puertos 3000 y 8000); el freno a otras webs es el rechazo
+   de `Sec-Fetch-Site: cross-site`. CORS es una capa adicional, no el control
+   único.
 4. **Recorrido de rutas:** valida ids y números, rechaza rutas absolutas y `..`,
    resuelve enlaces simbólicos y comprueba con `Path.is_relative_to()` que el
    destino real sigue bajo `CURSOS_DIR` o `ESTUDIO_DIR`.

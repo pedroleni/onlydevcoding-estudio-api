@@ -21,8 +21,10 @@ ruta de explotación concreta.
   mitiga DNS rebinding. `Origin`, cuando exista, debe coincidir exactamente con
   `ORIGEN_WEB` (por defecto `http://127.0.0.1:3000`). La web también se abre en
   `127.0.0.1` para compartir sitio con la API. Toda petición HTTP marcada por el
-  navegador con `Sec-Fetch-Site: cross-site` se rechaza y `/api/medios` envía
-  `Cross-Origin-Resource-Policy: same-site`.
+  navegador con `Sec-Fetch-Site: cross-site` se rechaza; es lo que impide que
+  otra web incruste los medios. `/api/medios` no envía
+  `Cross-Origin-Resource-Policy: same-site` a propósito: Chromium bloquea con
+  ella los medios entre `127.0.0.1:3000` y `127.0.0.1:8000`.
 - CORS no sustituye las comprobaciones de `Host` y `Origin`.
 - La fase 1 es de solo lectura en `CURSOS_DIR` y `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
