@@ -5,6 +5,12 @@ set -euo pipefail
 PROJECT_ROOT="${1:-.}"
 FINDINGS=0
 
+finding() {
+    local severity="$1" detail="$2"
+    printf '[%s] %s\n' "$severity" "$detail"
+    case "$severity" in CRITICAL|HIGH) FINDINGS=$((FINDINGS + 1));; esac
+}
+
 check() {
     local severity="$1" category="$2" pattern="$3"
     local matches
@@ -19,6 +25,11 @@ check() {
 }
 
 echo "=== Escáner de patrones de código Python ==="
+for required_dir in estudio_api tests scripts; do
+    if [ ! -d "$PROJECT_ROOT/$required_dir" ]; then
+        finding HIGH "Falta la raíz de escaneo requerida: $required_dir/"
+    fi
+done
 check CRITICAL "Inyección de comandos" 'shell[[:space:]]*=[[:space:]]*True|os\.(system|popen)[[:space:]]*\('
 check HIGH "Ejecución dinámica" '(^|[^[:alnum:]_])(eval|exec)[[:space:]]*\('
 check HIGH "Deserialización insegura" 'pickle\.loads?[[:space:]]*\(|yaml\.load[[:space:]]*\('

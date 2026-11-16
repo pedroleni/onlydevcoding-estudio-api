@@ -13,14 +13,36 @@ finding() {
 
 echo "=== Escáner de prompt injection ==="
 
+for required_dir in estudio_api tests scripts docs .claude; do
+    if [ ! -d "$PROJECT_ROOT/$required_dir" ]; then
+        finding HIGH "Falta la raíz de escaneo requerida: $required_dir/"
+    fi
+done
+for required_file in README.md AGENTS.md CLAUDE.md pyproject.toml; do
+    if [ ! -f "$PROJECT_ROOT/$required_file" ]; then
+        finding HIGH "Falta el archivo de escaneo requerido: $required_file"
+    fi
+done
+
 if ! python3 - "$PROJECT_ROOT" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-roots = [root / "estudio_api", root / "tests", root / "scripts"]
-config_files = [root / "AGENTS.md", root / "CLAUDE.md", root / "pyproject.toml"]
+roots = [
+    root / "estudio_api",
+    root / "tests",
+    root / "scripts",
+    root / "docs",
+    root / ".claude",
+]
+config_files = [
+    root / "README.md",
+    root / "AGENTS.md",
+    root / "CLAUDE.md",
+    root / "pyproject.toml",
+]
 suffixes = {".py", ".sh", ".md", ".toml", ".yml", ".yaml", ".json"}
 files = list(config_files)
 for base in roots:
@@ -29,7 +51,11 @@ for base in roots:
             path for path in base.rglob("*")
             if path.is_file()
             and path.suffix in suffixes
-            and not (base == root / "scripts" and path.parent == root / "scripts/security" and path.name.startswith("scan_"))
+            and not (
+                base == root / "scripts"
+                and path.parent == root / "scripts/security"
+                and path.name.startswith("scan_")
+            )
         )
 
 invisible = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u00ad]")
@@ -78,4 +104,3 @@ if [ "$FINDINGS" -gt 0 ]; then
     exit 1
 fi
 echo "OK: sin indicadores CRITICAL/HIGH de prompt injection."
-

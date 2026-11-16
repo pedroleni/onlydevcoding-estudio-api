@@ -12,8 +12,10 @@ blocking() {
 
 echo "=== Escáner de dependencias Python ==="
 
+[ -d "$PROJECT_ROOT" ] || blocking "Falta la raíz del proyecto: $PROJECT_ROOT"
 [ -f "$PROJECT_ROOT/pyproject.toml" ] || blocking "Falta pyproject.toml."
 [ -f "$PROJECT_ROOT/uv.lock" ] || blocking "Falta uv.lock."
+[ -f "$PROJECT_ROOT/.gitignore" ] || blocking "Falta .gitignore."
 if [ -f "$PROJECT_ROOT/.gitignore" ] && grep -Eq '(^|/)uv\.lock([[:space:]]|$)' "$PROJECT_ROOT/.gitignore"; then
     blocking "uv.lock está ignorado."
 fi

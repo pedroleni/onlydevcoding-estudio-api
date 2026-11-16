@@ -13,6 +13,12 @@ finding() {
 
 echo "=== Escáner de configuración ==="
 
+for required_dir in estudio_api tests scripts .github/workflows; do
+    if [ ! -d "$PROJECT_ROOT/$required_dir" ]; then
+        finding HIGH "Falta la raíz de escaneo requerida: $required_dir/"
+    fi
+done
+
 exposed=$(grep -RInE '(--host[[:space:]]+(0\.0\.0\.0|::)|host[[:space:]]*:[[:space:]]*(0\.0\.0\.0|::))' \
     "$PROJECT_ROOT/estudio_api" "$PROJECT_ROOT/tests" "$PROJECT_ROOT/scripts" \
     "$PROJECT_ROOT/.github" --include='*.py' --include='*.sh' --include='*.yml' \
@@ -36,8 +42,8 @@ if [ -d "$PROJECT_ROOT/.github/workflows" ]; then
             [ -z "$ref" ] && continue
             ref=$(printf '%s' "$ref" | sed -E 's/[[:space:]]*#.*$//')
             version=${ref##*@}
-            if ! printf '%s' "$version" | grep -Eq '^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'; then
-                finding HIGH "$workflow usa una acción sin SHA o versión exacta: $ref"
+            if ! printf '%s' "$version" | grep -Eq '^[0-9a-f]{40}$'; then
+                finding HIGH "$workflow usa una acción sin SHA de 40 caracteres: $ref"
             fi
         done < <(grep -E '^[[:space:]]*-[[:space:]]+uses:' "$workflow" | sed -E 's/.*uses:[[:space:]]*//' || true)
     done < <(find "$PROJECT_ROOT/.github/workflows" -type f \( -name '*.yml' -o -name '*.yaml' \) -print)

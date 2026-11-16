@@ -5,6 +5,13 @@ set -euo pipefail
 PROJECT_ROOT="${1:-.}"
 FINDINGS=0
 
+SCAN_DIRS=(
+    estudio_api tests scripts .github .githooks docs .claude
+)
+SCAN_FILES=(
+    pyproject.toml .env.example README.md AGENTS.md CLAUDE.md
+)
+
 finding() {
     local severity="$1" detail="$2"
     printf '[%s] %s\n' "$severity" "$detail"
@@ -14,12 +21,15 @@ finding() {
 scan_regex() {
     local severity="$1" label="$2" pattern="$3"
     local matches
-    matches=$(grep -RInE "$pattern" \
-        "$PROJECT_ROOT/estudio_api" "$PROJECT_ROOT/tests" "$PROJECT_ROOT/scripts" \
-        "$PROJECT_ROOT/.github" "$PROJECT_ROOT/.githooks" \
-        "$PROJECT_ROOT/pyproject.toml" "$PROJECT_ROOT/.env.example" \
+    local targets=()
+    local target
+    for target in "${SCAN_DIRS[@]}" "${SCAN_FILES[@]}"; do
+        [ -e "$PROJECT_ROOT/$target" ] && targets+=("$PROJECT_ROOT/$target")
+    done
+    matches=$(grep -RInE "$pattern" "${targets[@]}" \
         --include='*.py' --include='*.sh' --include='*.toml' --include='*.yml' \
-        --include='*.yaml' --include='*.json' --include='*.env' --include='.env.example' \
+        --include='*.yaml' --include='*.json' --include='*.env' --include='*.md' \
+        --include='.env.example' \
         --exclude='scan_*.sh' 2>/dev/null || true)
     if [ -n "$matches" ]; then
         while IFS= read -r match; do
@@ -29,6 +39,16 @@ scan_regex() {
 }
 
 echo "=== Escáner de secretos y datos privados ==="
+for required_dir in "${SCAN_DIRS[@]}"; do
+    if [ ! -d "$PROJECT_ROOT/$required_dir" ]; then
+        finding HIGH "Falta la raíz de escaneo requerida: $required_dir/"
+    fi
+done
+for required_file in "${SCAN_FILES[@]}"; do
+    if [ ! -f "$PROJECT_ROOT/$required_file" ]; then
+        finding HIGH "Falta el archivo de escaneo requerido: $required_file"
+    fi
+done
 scan_regex CRITICAL "Clave privada" '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
 scan_regex CRITICAL "Clave de proveedor" '(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{48,}|gh[pousr]_[A-Za-z0-9_]{36,}'
 scan_regex CRITICAL "URL con credenciales" '(postgres(ql)?|mysql|redis|mongodb(\+srv)?)://[^[:space:]:]+:[^[:space:]@]+@'

@@ -13,13 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@v7.1.2
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
         with:
-          version: "0.9.11"
+          version: "0.13.8"
       - name: Sincronizar entorno
         run: uv sync --frozen
       - name: Lint
         run: uv run ruff check .
       - name: Tests
         run: uv run pytest -q
-
