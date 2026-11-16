@@ -5,10 +5,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from estudio_api.config import Config
+from estudio_api.estado import calcular_estado
 from estudio_api.modelos import (
     Curso,
     Escena,
-    EstadoLeccion,
     Leccion,
     LeccionResumen,
     Pieza,
@@ -207,6 +207,7 @@ def leer_lecciones(config: Config, curso: str) -> list[LeccionResumen]:
     lecciones: list[LeccionResumen] = []
     for numero in sorted(set(carpetas) | set(guiones)):
         slug = guiones[numero][0] if numero in guiones else carpetas[numero][0]
+        carpeta = carpetas[numero][1] if numero in carpetas else None
         guion = guiones[numero][2] if numero in guiones else None
         titulo = _texto(guion.get("titulo")) if guion else ""
         lecciones.append(
@@ -215,7 +216,7 @@ def leer_lecciones(config: Config, curso: str) -> list[LeccionResumen]:
                 numero=numero,
                 slug=slug,
                 titulo=titulo or _titulo_desde_slug(slug),
-                estado=EstadoLeccion(),
+                estado=calcular_estado(config, curso, numero, carpeta, guion),
             )
         )
     return lecciones
@@ -534,7 +535,7 @@ def leer_leccion(config: Config, curso: str, numero: int) -> Leccion | None:
         numero=numero,
         slug=slug,
         titulo=titulo,
-        estado=EstadoLeccion(),
+        estado=calcular_estado(config, curso, numero, carpeta, guion),
         subtitulo=_texto(guion.get("subtitulo")) if guion else "",
         escenas=_escenas(guion, tiempos),
         piezas=_piezas(config, carpeta, titulo),

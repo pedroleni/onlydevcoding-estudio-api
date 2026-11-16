@@ -161,14 +161,23 @@ def test_ignora_anteriores_y_descartadas(cfg):
     assert all("descartad" not in video for video in videos)
 
 
-def test_estado_vacio_por_defecto(cfg):
+def test_estado_calculado_desde_los_archivos(cfg):
     leccion = leer_leccion(cfg, "react", 4)
 
     assert leccion is not None
-    assert leccion.estado.guion is False
-    assert leccion.estado.voz.hechas == leccion.estado.voz.total == 0
-    assert leccion.estado.camara.hechas == leccion.estado.camara.total == 0
-    assert leccion.estado.publicado == {}
+    assert leccion.estado.guion is True
+    assert leccion.estado.voz.hechas == 0
+    assert leccion.estado.voz.total == 1
+    assert leccion.estado.camara.hechas == 0
+    assert leccion.estado.camara.total == 1
+    assert leccion.estado.video_final is True
+    assert leccion.estado.previa.endswith("/previa/previa-v10.mp4")
+    assert leccion.estado.publicado == {
+        "youtube": False,
+        "instagram": False,
+        "tiktok": False,
+        "linkedin": False,
+    }
 
 
 def test_curso_invalido_no_se_lee(cfg):
