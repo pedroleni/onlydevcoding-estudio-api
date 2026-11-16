@@ -9,7 +9,9 @@ from estudio_api.config import Config
 from estudio_api.rutas import ruta_segura
 
 TAMANO_TROZO = 64 * 1024
-PATRON_RANGE = re.compile(r"^bytes=([0-9]{0,18})-([0-9]{0,18})$")
+MAX_DIGITOS_RANGE = 19
+PATRON_RANGE = re.compile(r"^bytes=([0-9]*)-([0-9]*)$", re.IGNORECASE)
+RANGO_NO_SATISFACIBLE = object()
 TIPOS_MEDIO = {
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
@@ -46,31 +48,38 @@ def _resolver_ruta(config: Config, ruta_publica: str) -> Path | None:
     return ruta
 
 
-def _rango_solicitado(cabecera: str, tamano: int) -> tuple[int, int] | None:
+def _rango_solicitado(
+    cabecera: str,
+    tamano: int,
+) -> tuple[int, int] | object | None:
     coincidencia = PATRON_RANGE.fullmatch(cabecera)
-    if coincidencia is None or tamano == 0:
+    if coincidencia is None:
         return None
 
     inicio_texto, fin_texto = coincidencia.groups()
     if not inicio_texto and not fin_texto:
         return None
+    if max(len(inicio_texto), len(fin_texto)) > MAX_DIGITOS_RANGE:
+        return RANGO_NO_SATISFACIBLE
+    if tamano == 0:
+        return RANGO_NO_SATISFACIBLE
 
     if not inicio_texto:
         longitud = int(fin_texto)
         if longitud <= 0:
-            return None
+            return RANGO_NO_SATISFACIBLE
         inicio = max(tamano - longitud, 0)
         return inicio, tamano - 1
 
     inicio = int(inicio_texto)
     if inicio >= tamano:
-        return None
+        return RANGO_NO_SATISFACIBLE
     if not fin_texto:
         return inicio, tamano - 1
 
     fin = int(fin_texto)
     if fin < inicio:
-        return None
+        return RANGO_NO_SATISFACIBLE
     return inicio, min(fin, tamano - 1)
 
 
@@ -101,20 +110,25 @@ def servir_medio(
         return Response(status_code=404)
 
     cabeceras = {"Accept-Ranges": "bytes"}
-    if cabecera_range is None:
+    rango = (
+        None
+        if cabecera_range is None
+        else _rango_solicitado(cabecera_range, tamano)
+    )
+    if rango is None:
         inicio = 0
         longitud = tamano
         estado = 200
+    elif rango is RANGO_NO_SATISFACIBLE:
+        return Response(
+            status_code=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{tamano}",
+            },
+        )
     else:
-        rango = _rango_solicitado(cabecera_range, tamano)
-        if rango is None:
-            return Response(
-                status_code=416,
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes */{tamano}",
-                },
-            )
+        assert isinstance(rango, tuple)
         inicio, fin = rango
         longitud = fin - inicio + 1
         estado = 206

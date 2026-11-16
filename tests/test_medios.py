@@ -84,6 +84,18 @@ def test_range_fuera_del_archivo(cliente):
     assert respuesta.headers["content-range"] == "bytes */16"
 
 
+def test_range_con_inicio_mayor_que_fin_devuelve_416(cliente):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Range": "bytes=10-9"},
+    )
+
+    assert respuesta.status_code == 416
+    assert respuesta.content == b""
+    assert respuesta.headers["content-range"] == "bytes */16"
+
+
 def test_range_con_numero_excesivamente_largo_es_invalido(cliente):
     respuesta = cliente.get(
         "/api/medios",
@@ -96,6 +108,41 @@ def test_range_con_numero_excesivamente_largo_es_invalido(cliente):
     assert respuesta.headers["content-range"] == "bytes */16"
 
 
+@pytest.mark.parametrize(
+    "cabecera",
+    [
+        "items=0-9",
+        "bytes=0-1,2-3",
+        "",
+        " bytes=0-9",
+        "bytes =0-9",
+        "bytes=0 -9",
+    ],
+)
+def test_range_desconocido_o_malformado_se_ignora(cliente, cabecera):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Range": cabecera},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.content == b"0123456789abcdef"
+    assert respuesta.headers["content-length"] == "16"
+
+
+def test_unidad_bytes_no_distingue_mayusculas(cliente):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Range": "BYTES=0-3"},
+    )
+
+    assert respuesta.status_code == 206
+    assert respuesta.content == b"0123"
+    assert respuesta.headers["content-range"] == "bytes 0-3/16"
+
+
 def test_directorio_enlazado_a_mitad_de_ruta_que_sale_de_raiz_devuelve_404(
     cliente,
     cfg,
@@ -104,14 +151,14 @@ def test_directorio_enlazado_a_mitad_de_ruta_que_sale_de_raiz_devuelve_404(
     directorio_fuera = tmp_path / "fuera"
     directorio_fuera.mkdir()
     (directorio_fuera / "secreto.mp4").write_bytes(b"secreto")
-    (cfg.cursos_dir / "enlace-directorio").symlink_to(
+    (cfg.cursos_dir / "REACT" / "enlace-directorio").symlink_to(
         directorio_fuera,
         target_is_directory=True,
     )
 
     respuesta = cliente.get(
         "/api/medios",
-        params={"ruta": "cursos/enlace-directorio/secreto.mp4"},
+        params={"ruta": "cursos/REACT/enlace-directorio/secreto.mp4"},
     )
 
     assert respuesta.status_code == 404
@@ -126,8 +173,8 @@ def test_traversal_codificado_en_query_cruda_devuelve_404(cliente):
 @pytest.mark.parametrize(
     "ruta",
     [
-        r"cursos\REACT\04-importar-y-exportar\previa\previa-v1.mp4",
-        "cursos/REACT/archivo\x00.mp4",
+        r"cursos\..\..",
+        "cursos/REACT/x.mp4\x00.json",
         "estudio/lecciones/react-04.JSON",
     ],
 )
@@ -138,10 +185,13 @@ def test_rutas_malformadas_o_extension_prohibida_devuelven_404(cliente, ruta):
 
 
 def test_enlace_mp4_a_extension_prohibida_dentro_de_raiz_devuelve_404(cliente, cfg):
-    archivo_privado = cfg.cursos_dir / ".env"
-    archivo_privado.write_text("SECRETO=falso", encoding="utf-8")
-    (cfg.cursos_dir / "x.mp4").symlink_to(archivo_privado)
+    archivo_privado = cfg.cursos_dir / "REACT" / "datos.json"
+    archivo_privado.write_text("{}", encoding="utf-8")
+    (cfg.cursos_dir / "REACT" / "camuflado.mp4").symlink_to(archivo_privado)
 
-    respuesta = cliente.get("/api/medios", params={"ruta": "cursos/x.mp4"})
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": "cursos/REACT/camuflado.mp4"},
+    )
 
     assert respuesta.status_code == 404

@@ -28,6 +28,10 @@ def cfg(tmp_path):
     (leccion / "previa" / "previa-v10.mp4").write_bytes(b"previa 10")
     (leccion / "previa" / "previa-v2.mp4").write_bytes(b"previa 2")
     (leccion / "previa" / "fotograma.JPEG").write_bytes(b"imagen")
+    (cursos_dir / "REACT" / ".env").write_text(
+        "SECRETO=falso",
+        encoding="utf-8",
+    )
     (youtube / "curso-react-04-ejemplo.mp4").write_bytes(b"leccion")
     (youtube / "miniatura-A-ejemplo.jpg").write_bytes(b"miniatura")
     (verticales / "reel-salida.mp4").write_bytes(b"reel")
