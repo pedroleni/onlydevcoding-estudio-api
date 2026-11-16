@@ -18,22 +18,37 @@ finding() {
     case "$severity" in CRITICAL|HIGH) FINDINGS=$((FINDINGS + 1));; esac
 }
 
+# Todo lo versionado o pendiente de versionar (sin filtrar por extensión); fuera
+# de git (p. ej. la copia del índice que hace el hook), todos los archivos.
+# Solo se excluyen, por ruta exacta, los propios escáneres.
+listar_archivos() {
+    if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$PROJECT_ROOT" ls-files -z --cached --others --exclude-standard
+    else
+        (cd "$PROJECT_ROOT" && find . -type f \
+            -not -path './.git/*' -not -path './.venv/*' \
+            -not -path '*/__pycache__/*' -not -path './.ruff_cache/*' \
+            -not -path './.pytest_cache/*' -print0)
+    fi
+}
+
+ARCHIVOS=()
+while IFS= read -r -d '' archivo; do
+    archivo="${archivo#./}"
+    case "$archivo" in
+        scripts/security/scan_*.sh) continue ;;
+    esac
+    [ -f "$PROJECT_ROOT/$archivo" ] && ARCHIVOS+=("$PROJECT_ROOT/$archivo")
+done < <(listar_archivos)
+
 scan_regex() {
     local severity="$1" label="$2" pattern="$3"
     local matches
-    local targets=()
-    local target
-    for target in "${SCAN_DIRS[@]}" "${SCAN_FILES[@]}"; do
-        [ -e "$PROJECT_ROOT/$target" ] && targets+=("$PROJECT_ROOT/$target")
-    done
-    matches=$(grep -RInE "$pattern" "${targets[@]}" \
-        --include='*.py' --include='*.sh' --include='*.toml' --include='*.yml' \
-        --include='*.yaml' --include='*.json' --include='*.env' --include='*.md' \
-        --include='.env.example' \
-        --exclude='scan_*.sh' 2>/dev/null || true)
+    [ "${#ARCHIVOS[@]}" -eq 0 ] && return 0
+    matches=$(grep -IlE -- "$pattern" "${ARCHIVOS[@]}" 2>/dev/null || true)
     if [ -n "$matches" ]; then
         while IFS= read -r match; do
-            finding "$severity" "$label en ${match%%:*} (valor omitido)"
+            finding "$severity" "$label en ${match#"$PROJECT_ROOT"/} (valor omitido)"
         done <<< "$matches"
     fi
 }

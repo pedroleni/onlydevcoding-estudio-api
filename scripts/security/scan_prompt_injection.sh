@@ -26,37 +26,28 @@ done
 
 if ! python3 - "$PROJECT_ROOT" <<'PY'
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-roots = [
-    root / "estudio_api",
-    root / "tests",
-    root / "scripts",
-    root / "docs",
-    root / ".claude",
-]
-config_files = [
-    root / "README.md",
-    root / "AGENTS.md",
-    root / "CLAUDE.md",
-    root / "pyproject.toml",
-]
-suffixes = {".py", ".sh", ".md", ".toml", ".yml", ".yaml", ".json"}
-files = list(config_files)
-for base in roots:
-    if base.exists():
-        files.extend(
-            path for path in base.rglob("*")
-            if path.is_file()
-            and path.suffix in suffixes
-            and not (
-                base == root / "scripts"
-                and path.parent == root / "scripts/security"
-                and path.name.startswith("scan_")
-            )
-        )
+# Todo lo versionado o pendiente de versionar, sin filtrar por extensión; fuera
+# de git (la copia del índice que hace el hook), todos los archivos. Solo se
+# excluye este escáner, que contiene los patrones que busca.
+EXCLUIDOS = {"scripts/security/scan_prompt_injection.sh"}
+DIRECTORIOS_IGNORADOS = {".git", ".venv", "__pycache__", ".ruff_cache", ".pytest_cache"}
+try:
+    salida = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        check=True, capture_output=True,
+    ).stdout.decode()
+    relativas = [r for r in salida.split("\0") if r]
+except (subprocess.CalledProcessError, FileNotFoundError):
+    relativas = [
+        p.relative_to(root).as_posix() for p in root.rglob("*")
+        if p.is_file() and not DIRECTORIOS_IGNORADOS.intersection(p.relative_to(root).parts)
+    ]
+files = [root / r for r in relativas if r not in EXCLUIDOS and (root / r).is_file()]
 
 invisible = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u00ad]")
 directive = re.compile(

@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash, Read, Glob, Grep, LS, Task
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(bash scripts/security/scan_*.sh:*), Bash(bash scripts/security/test_*.sh:*), Read, Glob, Grep, LS, Task
 description: Auditoría de seguridad completa de la API local mediante ocho dominios
 ---
 

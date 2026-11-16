@@ -22,3 +22,9 @@ jobs:
           for scanner in scripts/security/scan_*.sh; do
             bash "$scanner" .
           done
+      - name: Tests de contrato de los scanners
+        run: |
+          set -euo pipefail
+          for test in scripts/security/test_*.sh; do
+            bash "$test"
+          done

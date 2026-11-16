@@ -7,7 +7,14 @@ from estudio_api.seguridad import SeguridadLocalMiddleware
 
 
 def crear_app(config: Config) -> FastAPI:
-    aplicacion = FastAPI(title="Estudio OnlyDevCoding")
+    # Sin /docs, /redoc ni /openapi.json: cargan JavaScript de un CDN en el
+    # mismo origen que la API y podrían leer guiones y medios.
+    aplicacion = FastAPI(
+        title="Estudio OnlyDevCoding",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     aplicacion.state.config = config
     aplicacion.add_middleware(
         CORSMiddleware,

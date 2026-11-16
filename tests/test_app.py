@@ -151,3 +151,9 @@ def test_origen_web_por_defecto_usa_127_0_0_1(tmp_path):
     config = Config(cursos_dir=tmp_path, estudio_dir=tmp_path)
 
     assert config.origen_web == "http://127.0.0.1:3000"
+
+
+@pytest.mark.parametrize("ruta", ["/docs", "/redoc", "/openapi.json"])
+def test_documentacion_interactiva_desactivada(cliente, ruta):
+    # /docs y /redoc cargan JavaScript de un CDN en el mismo origen que la API.
+    assert cliente.get(ruta).status_code == 404

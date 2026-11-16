@@ -27,7 +27,11 @@ def _resolver_ruta(config: Config, ruta_publica: str) -> Path | None:
         return None
 
     partes = ruta_publica.split("/")
-    if len(partes) < 2 or any(parte in {"", ".", ".."} for parte in partes):
+    if len(partes) < 2 or any(
+        parte in {"", "node_modules"} or parte.startswith(".") for parte in partes
+    ):
+        # Ni dependencias del estudio ni archivos o carpetas ocultos (".", "..",
+        # ".git", ".env"...): solo medios de las lecciones.
         return None
 
     raices = {

@@ -19,6 +19,6 @@ jobs:
       - name: Sincronizar entorno
         run: uv sync --frozen
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
       - name: Tests
-        run: uv run pytest -q
+        run: uv run --frozen pytest -q

@@ -216,3 +216,23 @@ def test_enlace_mp4_a_extension_prohibida_dentro_de_raiz_devuelve_404(cliente, c
     )
 
     assert respuesta.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "relativa",
+    [
+        "node_modules/paquete/demo.mp4",
+        ".oculta/demo.mp4",
+        "public/.demo.png",
+        "cursos-x/.git/demo.png",
+    ],
+)
+def test_medios_no_sirven_dependencias_ni_ocultos(cfg, cliente, relativa):
+    for raiz, prefijo in ((cfg.estudio_dir, "estudio"), (cfg.cursos_dir, "cursos")):
+        archivo = raiz / relativa
+        archivo.parent.mkdir(parents=True, exist_ok=True)
+        archivo.write_bytes(b"medio")
+
+        respuesta = cliente.get("/api/medios", params={"ruta": f"{prefijo}/{relativa}"})
+
+        assert respuesta.status_code == 404
