@@ -1,0 +1,95 @@
+import json
+
+import pytest
+
+from estudio_api.config import Config
+
+
+@pytest.fixture
+def cfg(tmp_path):
+    cursos_dir = tmp_path / "cursos"
+    estudio_dir = tmp_path / "estudio"
+    cursos_dir.mkdir()
+    (estudio_dir / "lecciones").mkdir(parents=True)
+
+    leccion = cursos_dir / "REACT" / "04-importar-y-exportar"
+    (leccion / "previa").mkdir(parents=True)
+    youtube = leccion / "publicar" / "1-youtube-leccion"
+    verticales = leccion / "publicar" / "2-shorts-y-reels"
+    opciones = verticales / "portadas-opciones"
+    youtube.mkdir(parents=True)
+    opciones.mkdir(parents=True)
+    (verticales / "anteriores").mkdir()
+    (verticales / "descartadas").mkdir()
+
+    (leccion / "previa" / "previa-v10.mp4").write_bytes(b"previa 10")
+    (leccion / "previa" / "previa-v2.mp4").write_bytes(b"previa 2")
+    (youtube / "curso-react-04-ejemplo.mp4").write_bytes(b"leccion")
+    (youtube / "miniatura-A-ejemplo.jpg").write_bytes(b"miniatura")
+    (verticales / "reel-salida.mp4").write_bytes(b"reel")
+    (verticales / "short-2-ejemplo.mp4").write_bytes(b"short")
+    (verticales / "portada-short-2-principal.jpg").write_bytes(b"portada")
+    (opciones / "portada-short-2-alternativa.jpg").write_bytes(b"opcion")
+    (verticales / "reel-salida-anterior.mp4").write_bytes(b"anterior")
+    (verticales / "anteriores" / "reel-antiguo.mp4").write_bytes(b"antiguo")
+    (verticales / "descartadas" / "short-1-descartado.mp4").write_bytes(b"descartado")
+
+    (cursos_dir / "REACT" / "05-otra").mkdir()
+    (cursos_dir / "Asset").mkdir()
+    (cursos_dir / "Fondos de pantalla").mkdir()
+    (cursos_dir / "Intros (propuestas)").mkdir()
+    (cursos_dir / "README.md").write_text("Datos ficticios", encoding="utf-8")
+    (cursos_dir / "indice.html").write_text("<p>Falso</p>", encoding="utf-8")
+
+    guion = {
+        "ficha": "React",
+        "numero": 4,
+        "titulo": "Importar componentes",
+        "subtitulo": "Organiza un proyecto de ejemplo",
+        "carpeta": "REACT/04-importar-y-exportar",
+        "escenas": [
+            {
+                "id": "E01",
+                "modo": "camara",
+                "tipo": "camara",
+                "titulo": "Presentación",
+                "cues": [{"texto": "Texto ficticio de apertura."}],
+            },
+            {
+                "id": "E03",
+                "modo": "voz",
+                "tipo": "titulo",
+                "titulo": "Un concepto inventado",
+                "cues": [{"texto": "Explicación ficticia.", "paso": "inicio"}],
+            },
+            {
+                "id": "E04",
+                "modo": "animacion",
+                "tipo": "codigo",
+                "titulo": "Ejemplo visual",
+            },
+        ],
+        "ganchos": [{"texto": "Gancho ficticio."}],
+    }
+    (estudio_dir / "lecciones" / "react-04.json").write_text(
+        json.dumps(guion),
+        encoding="utf-8",
+    )
+
+    montaje_dir = estudio_dir / "public" / "lecciones" / "react-04"
+    montaje_dir.mkdir(parents=True)
+    montaje = {
+        "fps": 30,
+        "duracion": 180,
+        "escenas": [
+            {"id": "E01", "duracion": 60},
+            {"id": "E03", "duracion": 90},
+            {"id": "E04", "duracion": 30},
+        ],
+    }
+    (montaje_dir / "montaje.json").write_text(
+        json.dumps(montaje),
+        encoding="utf-8",
+    )
+
+    return Config(cursos_dir=cursos_dir, estudio_dir=estudio_dir)
