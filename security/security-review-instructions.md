@@ -30,8 +30,11 @@ ruta de explotación concreta.
 - Toda petición distinta de `GET`, `HEAD` y `OPTIONS` exige
   `X-Estudio-Token`, comparado con `ESTUDIO_TOKEN` mediante
   `hmac.compare_digest`. Si falta la configuración se devuelve 503; si falta la
-  cabecera o no coincide, 401. Debe haber un único `Content-Length` decimal:
-  sin él o si es inválido se devuelve 411, y por encima de 256 KB, 413. CORS
+  cabecera o no coincide, 401. El token configurado debe tener 32 caracteres o
+  más. Todo WebSocket exige también el token y se cierra con 1008 si falta o no
+  coincide. Debe haber un único `Content-Length` decimal; `Transfer-Encoding`,
+  una longitud ausente o inválida reciben 411. Se cuentan además los bytes que
+  llegan por ASGI: superar 256 KB o la longitud declarada recibe 413. CORS
   continúa permitiendo solo `GET`.
 - Las únicas escrituras permitidas bajo `CURSOS_DIR` son
   `publicar/publicacion.json`, `publicar/PUBLICAR-leccion-N.md` y

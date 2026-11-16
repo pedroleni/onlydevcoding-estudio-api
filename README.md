@@ -24,9 +24,11 @@ same-site` porque Chromium bloquea con ella los medios entre
 
 Toda petición distinta de `GET`, `HEAD` u `OPTIONS` necesita que
 `X-Estudio-Token` coincida con `ESTUDIO_TOKEN`. Sin token configurado, las
-escrituras quedan desactivadas. Además, cada escritura debe declarar un
-`Content-Length` válido y no puede superar 256 KB. CORS continúa permitiendo
-solo `GET`, para que el token permanezca en el servidor de la web.
+escrituras quedan desactivadas; el token debe tener al menos 32 caracteres.
+Los WebSocket también exigen el token. Además, cada escritura debe declarar un
+único `Content-Length` válido, no puede usar `Transfer-Encoding` ni superar
+256 KB declarados o reales. CORS continúa permitiendo solo `GET`, para que el
+token permanezca en el servidor de la web.
 
 `BD_RUTA` define la base SQLite local y, por defecto, vale
 `datos/estudio.sqlite3`. La API solo puede escribir los archivos de publicación

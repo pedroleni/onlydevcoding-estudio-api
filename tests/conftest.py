@@ -5,8 +5,7 @@ from fastapi.testclient import TestClient
 
 from estudio_api.app import crear_app
 from estudio_api.config import Config
-
-TOKEN = "token-de-prueba"
+from tests.ayudas import TOKEN
 
 
 @pytest.fixture

@@ -25,8 +25,10 @@ autenticación: es una decisión explícita.
    único. Toda petición distinta de `GET`, `HEAD` y `OPTIONS` exige
    `X-Estudio-Token`, comparado con `ESTUDIO_TOKEN` mediante
    `hmac.compare_digest`; sin token configurado, las escrituras se rechazan.
-   También exige un único `Content-Length` decimal y limita el cuerpo a 256 KB.
-   CORS sigue permitiendo solo `GET`.
+   Todo WebSocket exige también ese token. Las escrituras rechazan
+   `Transfer-Encoding`, exigen un único `Content-Length` decimal y limitan a
+   256 KB tanto la longitud declarada como los bytes recibidos; tampoco pueden
+   superar el `Content-Length` declarado. CORS sigue permitiendo solo `GET`.
 4. **Recorrido de rutas:** valida ids y números, rechaza rutas absolutas y `..`,
    resuelve enlaces simbólicos y comprueba con `Path.is_relative_to()` que el
    destino real sigue bajo `CURSOS_DIR` o `ESTUDIO_DIR`.
