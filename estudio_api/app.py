@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from estudio_api.config import Config, cargar_config
+from estudio_api.rutas_api import router as router_api
 from estudio_api.seguridad import SeguridadLocalMiddleware
 
 
@@ -18,6 +19,7 @@ def crear_app(config: Config) -> FastAPI:
         SeguridadLocalMiddleware,
         origen_web=config.origen_web,
     )
+    aplicacion.include_router(router_api)
 
     @aplicacion.get("/api/salud")
     def salud() -> dict[str, bool]:

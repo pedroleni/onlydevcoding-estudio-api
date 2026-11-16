@@ -1,4 +1,6 @@
 import json
+import math
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -19,6 +21,10 @@ PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_CARPETA_LECCION = re.compile(r"^(\d{2})-(.+)$")
 PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 PATRON_SHORT = re.compile(r"^short-(\d+)(?:-.+)?\.mp4$", re.IGNORECASE)
+MAX_TAMANO_JSON = 5 * 1024 * 1024
+FPS_MINIMOS = 1.0
+FPS_MAXIMOS = 1000.0
+MAX_DURACION_SEGUNDOS = 24 * 60 * 60
 
 
 def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
@@ -44,8 +50,10 @@ def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
 def _leer_json(ruta: Path) -> dict[str, Any] | None:
     try:
         with ruta.open(encoding="utf-8") as archivo:
+            if os.fstat(archivo.fileno()).st_size > MAX_TAMANO_JSON:
+                return None
             datos = json.load(archivo)
-    except OSError, UnicodeError, json.JSONDecodeError:
+    except (OSError, UnicodeError, RecursionError, ValueError):
         return None
     return datos if isinstance(datos, dict) else None
 
@@ -240,37 +248,75 @@ def _tiempos_montaje(
     datos = _leer_json(ruta)
     if datos is None:
         return {}, None
-    fps = datos.get("fps")
-    if not isinstance(fps, (int, float)) or isinstance(fps, bool) or fps <= 0:
+    fps = _numero_finito_positivo(
+        datos.get("fps"),
+        minimo=FPS_MINIMOS,
+        maximo=FPS_MAXIMOS,
+    )
+    if fps is None:
         return {}, None
 
     tiempos: dict[str, tuple[float, float]] = {}
-    acumulada = 0.0
+    acumulada_s = 0.0
+    linea_tiempo_valida = True
     escenas = datos.get("escenas")
     if isinstance(escenas, list):
         for escena in escenas:
             if not isinstance(escena, dict):
                 continue
-            duracion = escena.get("duracion")
-            if (
-                not isinstance(duracion, (int, float))
-                or isinstance(duracion, bool)
-                or duracion < 0
-            ):
+            duracion_s = _duracion_en_segundos(escena.get("duracion"), fps)
+            if duracion_s is None:
+                linea_tiempo_valida = False
                 continue
             identificador = escena.get("id")
-            if isinstance(identificador, str):
-                tiempos[identificador] = (acumulada / fps, duracion / fps)
-            acumulada += duracion
+            if linea_tiempo_valida and isinstance(identificador, str):
+                tiempos[identificador] = (acumulada_s, duracion_s)
+            if linea_tiempo_valida:
+                acumulada_s += duracion_s
+                if (
+                    not math.isfinite(acumulada_s)
+                    or acumulada_s > MAX_DURACION_SEGUNDOS
+                ):
+                    linea_tiempo_valida = False
 
-    duracion_total = datos.get("duracion")
+    if "duracion" in datos:
+        return tiempos, _duracion_en_segundos(datos["duracion"], fps)
+    if isinstance(escenas, list) and escenas and linea_tiempo_valida:
+        return tiempos, acumulada_s
+    return tiempos, None
+
+
+def _numero_finito_positivo(
+    valor: object,
+    *,
+    minimo: float = 0.0,
+    maximo: float | None = None,
+) -> float | None:
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        return None
+    try:
+        numero = float(valor)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(numero) or numero <= 0 or numero < minimo:
+        return None
+    if maximo is not None and numero > maximo:
+        return None
+    return numero
+
+
+def _duracion_en_segundos(valor: object, fps: float) -> float | None:
+    fotogramas = _numero_finito_positivo(valor)
+    if fotogramas is None:
+        return None
+    segundos = fotogramas / fps
     if (
-        isinstance(duracion_total, (int, float))
-        and not isinstance(duracion_total, bool)
-        and duracion_total >= 0
+        not math.isfinite(segundos)
+        or segundos <= 0
+        or segundos > MAX_DURACION_SEGUNDOS
     ):
-        return tiempos, duracion_total / fps
-    return tiempos, acumulada / fps if escenas else None
+        return None
+    return segundos
 
 
 def _escenas(

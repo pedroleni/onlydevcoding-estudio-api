@@ -1,7 +1,9 @@
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
+from estudio_api.app import crear_app
 from estudio_api.config import Config
 
 
@@ -22,8 +24,10 @@ def cfg(tmp_path):
     (verticales / "anteriores").mkdir()
     (verticales / "descartadas").mkdir()
 
+    (leccion / "previa" / "previa-v1.mp4").write_bytes(b"0123456789abcdef")
     (leccion / "previa" / "previa-v10.mp4").write_bytes(b"previa 10")
     (leccion / "previa" / "previa-v2.mp4").write_bytes(b"previa 2")
+    (leccion / "previa" / "fotograma.JPEG").write_bytes(b"imagen")
     (youtube / "curso-react-04-ejemplo.mp4").write_bytes(b"leccion")
     (youtube / "miniatura-A-ejemplo.jpg").write_bytes(b"miniatura")
     (verticales / "reel-salida.mp4").write_bytes(b"reel")
@@ -40,6 +44,10 @@ def cfg(tmp_path):
     (cursos_dir / "Intros (propuestas)").mkdir()
     (cursos_dir / "README.md").write_text("Datos ficticios", encoding="utf-8")
     (cursos_dir / "indice.html").write_text("<p>Falso</p>", encoding="utf-8")
+
+    archivo_fuera = tmp_path.parent / f"{tmp_path.name}-fuera.mp4"
+    archivo_fuera.write_bytes(b"contenido fuera de la raiz")
+    (cursos_dir / "enlace-fuera.mp4").symlink_to(archivo_fuera)
 
     guion = {
         "ficha": "React",
@@ -92,4 +100,15 @@ def cfg(tmp_path):
         encoding="utf-8",
     )
 
-    return Config(cursos_dir=cursos_dir, estudio_dir=estudio_dir)
+    yield Config(cursos_dir=cursos_dir, estudio_dir=estudio_dir)
+
+    archivo_fuera.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def cliente(cfg):
+    with TestClient(
+        crear_app(cfg),
+        base_url="http://127.0.0.1:8000",
+    ) as test_client:
+        yield test_client

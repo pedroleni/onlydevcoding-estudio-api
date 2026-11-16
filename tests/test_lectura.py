@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from estudio_api.lectura import leer_cursos, leer_leccion, leer_lecciones
+from estudio_api.lectura import _leer_json, leer_cursos, leer_leccion, leer_lecciones
 from estudio_api.rutas import ruta_segura
 
 
@@ -58,6 +58,31 @@ def test_guion_que_no_es_objeto_se_ignora_sin_romper(cfg):
     )
 
     assert [leccion.numero for leccion in leer_lecciones(cfg, "react")] == [4, 5]
+
+
+@pytest.mark.parametrize("error", [RecursionError, ValueError])
+def test_error_al_decodificar_json_se_ignora(tmp_path, monkeypatch, error):
+    ruta = tmp_path / "datos.json"
+    ruta.write_text("{}", encoding="utf-8")
+
+    def fallar(_archivo):
+        raise error
+
+    monkeypatch.setattr("estudio_api.lectura.json.load", fallar)
+
+    assert _leer_json(ruta) is None
+
+
+def test_json_mayor_de_cinco_mb_no_se_lee(tmp_path, monkeypatch):
+    ruta = tmp_path / "demasiado-grande.json"
+    ruta.write_bytes(b" " * (5 * 1024 * 1024 + 1))
+
+    def no_debe_leerse(_archivo):
+        raise AssertionError("json.load no debe recibir archivos mayores de 5 MB")
+
+    monkeypatch.setattr("estudio_api.lectura.json.load", no_debe_leerse)
+
+    assert _leer_json(ruta) is None
 
 
 def test_leccion_sin_montaje_no_rompe(cfg):
@@ -124,6 +149,64 @@ def test_escenas_con_textos_y_tiempos(cfg):
         leccion.escenas[1].duracion_s,
     ) == ("E03", 2.0, 3.0)
     assert leccion.escenas[2].textos == []
+
+
+@pytest.mark.parametrize(
+    "fps",
+    [float("inf"), float("nan"), 0, -1, 0.000_001, 1001],
+)
+def test_fps_no_finito_o_absurdo_se_trata_como_desconocido(cfg, fps):
+    montaje = (
+        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
+    )
+    datos = json.loads(montaje.read_text(encoding="utf-8"))
+    datos["fps"] = fps
+    montaje.write_text(json.dumps(datos), encoding="utf-8")
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert leccion.duracion_s is None
+    assert all(escena.inicio_s is None for escena in leccion.escenas)
+    leccion.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "duracion",
+    [float("inf"), float("nan"), 0, -1, 10**20],
+)
+def test_duracion_no_finita_o_absurda_se_trata_como_desconocida(
+    cfg, duracion
+):
+    montaje = (
+        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
+    )
+    datos = json.loads(montaje.read_text(encoding="utf-8"))
+    datos["duracion"] = duracion
+    montaje.write_text(json.dumps(datos), encoding="utf-8")
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert leccion.duracion_s is None
+    leccion.model_dump_json()
+
+
+def test_duracion_de_escena_no_finita_se_trata_como_desconocida(cfg):
+    montaje = (
+        cfg.estudio_dir / "public" / "lecciones" / "react-04" / "montaje.json"
+    )
+    datos = json.loads(montaje.read_text(encoding="utf-8"))
+    datos["escenas"][1]["duracion"] = float("inf")
+    montaje.write_text(json.dumps(datos), encoding="utf-8")
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    escena = next(escena for escena in leccion.escenas if escena.id == "E03")
+    assert escena.inicio_s is None
+    assert escena.duracion_s is None
+    leccion.model_dump_json()
 
 
 def test_piezas_y_portadas(cfg):
@@ -217,6 +300,7 @@ def test_previas_ordenadas_por_numero_de_version(cfg):
 
     assert leccion is not None
     assert [ruta.rsplit("/", 1)[-1] for ruta in leccion.previas] == [
+        "previa-v1.mp4",
         "previa-v2.mp4",
         "previa-v10.mp4",
     ]
