@@ -42,6 +42,76 @@ def test_guion_sin_carpeta_aparece(cfg):
     assert leer_leccion(cfg, "react", 6).slug == "solo-guion"
 
 
+def test_guion_con_json_roto_se_ignora_sin_romper(cfg):
+    (cfg.estudio_dir / "lecciones" / "react-06.json").write_text(
+        "{json roto",
+        encoding="utf-8",
+    )
+
+    assert [leccion.numero for leccion in leer_lecciones(cfg, "react")] == [4, 5]
+
+
+def test_guion_que_no_es_objeto_se_ignora_sin_romper(cfg):
+    (cfg.estudio_dir / "lecciones" / "react-06.json").write_text(
+        json.dumps(["no", "es", "un", "objeto"]),
+        encoding="utf-8",
+    )
+
+    assert [leccion.numero for leccion in leer_lecciones(cfg, "react")] == [4, 5]
+
+
+def test_leccion_sin_montaje_no_rompe(cfg):
+    montaje = (
+        cfg.estudio_dir
+        / "public"
+        / "lecciones"
+        / "react-04"
+        / "montaje.json"
+    )
+    montaje.unlink()
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert leccion.duracion_s is None
+    assert [
+        (escena.id, escena.textos, escena.inicio_s, escena.duracion_s)
+        for escena in leccion.escenas
+    ] == [
+        ("E01", ["Texto ficticio de apertura."], None, None),
+        ("E03", ["Explicación ficticia."], None, None),
+        ("E04", [], None, None),
+    ]
+
+
+def test_enlace_de_curso_que_apunta_fuera_se_ignora(cfg, tmp_path):
+    curso_fuera = tmp_path / "fuera" / "MALICIOSO" / "01-secreto"
+    curso_fuera.mkdir(parents=True)
+    (cfg.cursos_dir / "MALICIOSO").symlink_to(curso_fuera.parent, target_is_directory=True)
+
+    cursos = leer_cursos(cfg)
+
+    assert [curso.id for curso in cursos] == ["react"]
+
+
+def test_guion_con_carpeta_que_contiene_padre_se_ignora(cfg, tmp_path):
+    carpeta_fuera = tmp_path / "06-fuera"
+    carpeta_fuera.mkdir()
+    guion = {
+        "ficha": "React",
+        "numero": 6,
+        "titulo": "No debe leerse",
+        "carpeta": "REACT/../06-fuera",
+        "escenas": [],
+    }
+    (cfg.estudio_dir / "lecciones" / "react-06.json").write_text(
+        json.dumps(guion),
+        encoding="utf-8",
+    )
+
+    assert [leccion.numero for leccion in leer_lecciones(cfg, "react")] == [4, 5]
+
+
 def test_escenas_con_textos_y_tiempos(cfg):
     leccion = leer_leccion(cfg, "react", 4)
 

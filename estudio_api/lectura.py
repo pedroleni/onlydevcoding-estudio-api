@@ -36,7 +36,7 @@ def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
         try:
             relativa = directorio.resolve().relative_to(raiz_resuelta)
             entradas.append(ruta_segura(raiz_resuelta, *relativa.parts, nombre))
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
     return entradas
 

@@ -21,7 +21,7 @@ def _ruta_de_leccion(
     try:
         relativa = carpeta.resolve().relative_to(config.cursos_dir.resolve())
         return ruta_segura(config.cursos_dir, *relativa.parts, *partes)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
 
