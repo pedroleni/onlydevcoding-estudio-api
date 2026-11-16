@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from estudio_api.estado import calcular_estado
-from estudio_api.modelos import Avance
+from estudio_api.estado import calcular_estado, publicado_por_red
+from estudio_api.modelos import Avance, EstadoRed
+from estudio_api.publicacion import Publicacion
 
 
 def _carpeta_leccion(cfg):
@@ -171,3 +172,43 @@ def test_redes(cfg):
         "linkedin",
     ]
     assert all(publicado is False for publicado in estado.publicado.values())
+
+
+def test_publicado_por_red_sin_json_preve_solo_leccion_en_youtube():
+    resultado = publicado_por_red(
+        None,
+        {("leccion", "youtube"): EstadoRed(estado="publicado")},
+    )
+
+    assert resultado == {
+        "youtube": True,
+        "instagram": False,
+        "tiktok": False,
+        "linkedin": False,
+    }
+
+
+def test_publicado_por_red_exige_todas_las_piezas_previstas():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {"redes": {"youtube": {}, "instagram": {}}},
+                "reel-salida": {"redes": {"instagram": {}}},
+            },
+        }
+    )
+    resultado = publicado_por_red(
+        publicacion,
+        {
+            ("leccion", "youtube"): EstadoRed(estado="publicado"),
+            ("leccion", "instagram"): EstadoRed(estado="publicado"),
+        },
+    )
+
+    assert resultado == {
+        "youtube": True,
+        "instagram": False,
+        "tiktok": False,
+        "linkedin": False,
+    }

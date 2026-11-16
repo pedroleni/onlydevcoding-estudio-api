@@ -1,14 +1,42 @@
+from __future__ import annotations
+
 import re
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from estudio_api.config import Config
-from estudio_api.modelos import Avance, EstadoLeccion
+from estudio_api.modelos import Avance, EstadoLeccion, EstadoRed
 from estudio_api.rutas import ruta_segura
+
+if TYPE_CHECKING:
+    from estudio_api.publicacion import Publicacion
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
+
+
+def publicado_por_red(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, bool]:
+    previstas: dict[str, list[tuple[str, str]]] = {red: [] for red in REDES}
+    if publicacion is None:
+        previstas["youtube"].append(("leccion", "youtube"))
+    else:
+        for pieza, datos in publicacion.piezas.items():
+            for red in datos.redes:
+                previstas[red].append((pieza, red))
+
+    return {
+        red: bool(pares)
+        and all(
+            estados.get(par) is not None and estados[par].estado == "publicado"
+            for par in pares
+        )
+        for red, pares in previstas.items()
+    }
 
 
 def _ruta_de_leccion(
@@ -155,6 +183,10 @@ def calcular_estado(
     numero: int,
     carpeta: Path | None,
     guion: dict[str, Any] | None,
+    *,
+    publicacion: Publicacion | None = None,
+    estados_publicacion: Mapping[tuple[str, str], EstadoRed] | None = None,
+    miniatura: str | None = None,
 ) -> EstadoLeccion:
     escenas_voz = _escenas(guion, "voz")
     escenas_camara = _escenas(guion, "camara")
@@ -172,7 +204,7 @@ def calcular_estado(
             total=len(escenas_camara),
         ),
         video_final=_hay_video_final(config, carpeta),
-        miniatura=None,
+        miniatura=miniatura,
         previa=_ultima_previa(config, carpeta),
-        publicado={red: False for red in REDES},
+        publicado=publicado_por_red(publicacion, estados_publicacion or {}),
     )

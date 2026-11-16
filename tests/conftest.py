@@ -105,7 +105,11 @@ def cfg(tmp_path):
         encoding="utf-8",
     )
 
-    yield Config(cursos_dir=cursos_dir, estudio_dir=estudio_dir)
+    yield Config(
+        cursos_dir=cursos_dir,
+        estudio_dir=estudio_dir,
+        bd_ruta=tmp_path / "datos" / "estudio.sqlite3",
+    )
 
     archivo_fuera.unlink(missing_ok=True)
 

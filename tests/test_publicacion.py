@@ -169,6 +169,46 @@ def test_descarta_rutas_ocultas_node_modules_y_symlink_fuera(
     assert pieza_leida.redes["linkedin"].video is None
 
 
+def test_descarta_symlink_visible_cuyo_destino_real_esta_oculto(
+    carpeta_publicacion, cfg
+):
+    publicar = carpeta_publicacion / "publicar"
+    oculto = publicar / ".h"
+    oculto.mkdir()
+    (oculto / "video.mp4").write_bytes(b"oculto")
+    (publicar / "video-visible.mp4").symlink_to(oculto / "video.mp4")
+    datos = _publicacion_valida()
+    datos["piezas"]["leccion"]["video"] = "video-visible.mp4"
+    _escribir_publicacion(carpeta_publicacion, datos)
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is not None
+    assert lectura.publicacion.piezas["leccion"].video is None
+
+
+def test_sustituto_unicode_suelto_invalida_el_archivo(carpeta_publicacion, cfg):
+    (carpeta_publicacion / "publicar" / "publicacion.json").write_bytes(
+        b'{"version":1,"piezas":{"leccion":{"titulo":"\\ud800"}}}'
+    )
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is None
+    assert lectura.error == "No se ha podido leer publicacion.json"
+
+
+def test_id_de_pieza_solo_admite_digitos_ascii(carpeta_publicacion, cfg):
+    datos = _publicacion_valida()
+    datos["piezas"]["short-1\u0663"] = datos["piezas"].pop("short-1")
+    _escribir_publicacion(carpeta_publicacion, datos)
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is None
+    assert lectura.error == "No se ha podido leer publicacion.json"
+
+
 def test_sin_carpeta_o_sin_archivo_no_es_un_error(carpeta_publicacion, cfg):
     assert leer_publicacion(cfg, None).model_dump() == {
         "publicacion": None,

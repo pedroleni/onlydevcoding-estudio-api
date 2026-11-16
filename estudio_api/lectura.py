@@ -2,11 +2,13 @@ import json
 import math
 import os
 import re
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from estudio_api.config import Config
+from estudio_api.decisiones import estados, portadas_elegidas
 from estudio_api.estado import calcular_estado
 from estudio_api.modelos import (
     Curso,
@@ -185,6 +187,17 @@ def _datos_curso(
     return carpeta_curso, carpetas, guiones
 
 
+def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
+    if isinstance(numero, bool) or not 1 <= numero <= 999:
+        return None
+    datos_curso = _datos_curso(config, curso)
+    if datos_curso is None:
+        return None
+    _, carpetas, _ = datos_curso
+    datos_carpeta = carpetas.get(numero)
+    return datos_carpeta[1] if datos_carpeta is not None else None
+
+
 def _titulo_desde_slug(slug: str) -> str:
     return slug.replace("-", " ").capitalize()
 
@@ -206,7 +219,11 @@ def leer_cursos(config: Config) -> list[Curso]:
     return cursos
 
 
-def leer_lecciones(config: Config, curso: str) -> list[LeccionResumen]:
+def leer_lecciones(
+    config: Config,
+    curso: str,
+    bd: sqlite3.Connection | None = None,
+) -> list[LeccionResumen]:
     datos_curso = _datos_curso(config, curso)
     if datos_curso is None:
         return []
@@ -218,13 +235,32 @@ def leer_lecciones(config: Config, curso: str) -> list[LeccionResumen]:
         carpeta = carpetas[numero][1] if numero in carpetas else None
         guion = guiones[numero][2] if numero in guiones else None
         titulo = _texto(guion.get("titulo")) if guion else ""
+        titulo = titulo or _titulo_desde_slug(slug)
+        piezas = _piezas(config, carpeta, titulo)
+        publicacion, estados_publicacion, miniatura = _decisiones_publicacion(
+            config,
+            curso,
+            numero,
+            carpeta,
+            piezas,
+            bd,
+        )
         lecciones.append(
             LeccionResumen(
                 curso=curso,
                 numero=numero,
                 slug=slug,
-                titulo=titulo or _titulo_desde_slug(slug),
-                estado=calcular_estado(config, curso, numero, carpeta, guion),
+                titulo=titulo,
+                estado=calcular_estado(
+                    config,
+                    curso,
+                    numero,
+                    carpeta,
+                    guion,
+                    publicacion=publicacion,
+                    estados_publicacion=estados_publicacion,
+                    miniatura=miniatura,
+                ),
             )
         )
     return lecciones
@@ -556,7 +592,45 @@ def _piezas(
     return piezas
 
 
-def leer_leccion(config: Config, curso: str, numero: int) -> Leccion | None:
+def _decisiones_publicacion(
+    config: Config,
+    curso: str,
+    numero: int,
+    carpeta: Path | None,
+    piezas: list[Pieza],
+    bd: sqlite3.Connection | None,
+):
+    if bd is None:
+        return None, {}, None
+
+    # Importación local para evitar el ciclo publicacion -> lectura -> estado.
+    from estudio_api.publicacion import leer_publicacion, ruta_publica_publicar
+
+    lectura = leer_publicacion(config, carpeta)
+    publicacion = lectura.publicacion
+    estados_guardados = estados(bd, curso, numero)
+    elegidas = portadas_elegidas(bd, curso, numero)
+
+    candidatas = next(
+        (list(pieza.portadas) for pieza in piezas if pieza.id == "leccion"),
+        [],
+    )
+    if publicacion is not None and "leccion" in publicacion.piezas and carpeta:
+        for relativa in publicacion.piezas["leccion"].portadas:
+            publica = ruta_publica_publicar(config, carpeta, relativa)
+            if publica is not None and publica not in candidatas:
+                candidatas.append(publica)
+    elegida = elegidas.get("leccion")
+    miniatura = elegida if elegida in candidatas else None
+    return publicacion, estados_guardados, miniatura
+
+
+def leer_leccion(
+    config: Config,
+    curso: str,
+    numero: int,
+    bd: sqlite3.Connection | None = None,
+) -> Leccion | None:
     if isinstance(numero, bool) or not 1 <= numero <= 999:
         return None
     datos_curso = _datos_curso(config, curso)
@@ -572,15 +646,33 @@ def leer_leccion(config: Config, curso: str, numero: int) -> Leccion | None:
     titulo = _texto(guion.get("titulo")) if guion else ""
     titulo = titulo or _titulo_desde_slug(slug)
     tiempos, duracion = _tiempos_montaje(config, curso, numero)
+    piezas = _piezas(config, carpeta, titulo)
+    publicacion, estados_publicacion, miniatura = _decisiones_publicacion(
+        config,
+        curso,
+        numero,
+        carpeta,
+        piezas,
+        bd,
+    )
     return Leccion(
         curso=curso,
         numero=numero,
         slug=slug,
         titulo=titulo,
-        estado=calcular_estado(config, curso, numero, carpeta, guion),
+        estado=calcular_estado(
+            config,
+            curso,
+            numero,
+            carpeta,
+            guion,
+            publicacion=publicacion,
+            estados_publicacion=estados_publicacion,
+            miniatura=miniatura,
+        ),
         subtitulo=_texto(guion.get("subtitulo")) if guion else "",
         escenas=_escenas(guion, tiempos),
-        piezas=_piezas(config, carpeta, titulo),
+        piezas=piezas,
         previas=_previas(config, carpeta),
         duracion_s=duracion,
     )

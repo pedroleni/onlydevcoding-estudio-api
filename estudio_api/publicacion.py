@@ -13,7 +13,9 @@ from estudio_api.rutas import ruta_segura
 Red = Literal["youtube", "instagram", "tiktok", "linkedin"]
 
 ERROR_LECTURA = "No se ha podido leer publicacion.json"
-PATRON_ID_PIEZA = re.compile(r"^(leccion|reel-salida(-[1-9]\d*)?|short-[1-9]\d*)$")
+PATRON_ID_PIEZA = re.compile(
+    r"^(leccion|reel-salida(-[1-9][0-9]*)?|short-[1-9][0-9]*)$"
+)
 MAX_LINEAS = 30
 MAX_CARACTERES_LINEA = 300
 
@@ -117,12 +119,35 @@ def _resolver_medio(publicar: Path, relativa: str) -> Path | None:
 
     try:
         ruta = ruta_segura(publicar, *partes)
+        partes_reales = ruta.relative_to(publicar.resolve()).parts
         datos = ruta.stat()
     except OSError, ValueError:
+        return None
+    if any(
+        parte in {"", "node_modules"} or parte.startswith(".")
+        for parte in partes_reales
+    ):
         return None
     if ruta.suffix.lower() not in TIPOS_MEDIO or not stat.S_ISREG(datos.st_mode):
         return None
     return ruta
+
+
+def _texto_codificable_en_utf8(valor: object) -> bool:
+    if isinstance(valor, str):
+        try:
+            valor.encode("utf-8")
+        except UnicodeError:
+            return False
+        return True
+    if isinstance(valor, dict):
+        return all(
+            _texto_codificable_en_utf8(clave) and _texto_codificable_en_utf8(elemento)
+            for clave, elemento in valor.items()
+        )
+    if isinstance(valor, list):
+        return all(_texto_codificable_en_utf8(elemento) for elemento in valor)
+    return True
 
 
 def ruta_publica_publicar(
@@ -179,6 +204,8 @@ def leer_publicacion(config: Config, carpeta: Path | None) -> LecturaPublicacion
     try:
         publicacion = Publicacion.model_validate(datos)
     except RecursionError, ValidationError, ValueError:
+        return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
+    if not _texto_codificable_en_utf8(publicacion.model_dump(mode="json")):
         return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
 
     _filtrar_medios(publicar, publicacion)
