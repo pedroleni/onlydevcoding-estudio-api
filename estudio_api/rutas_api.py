@@ -23,7 +23,10 @@ def listar_cursos(request: Request) -> list[Curso]:
 
 
 @router.get("/cursos/{curso}/lecciones", response_model=list[LeccionResumen])
-def listar_lecciones(request: Request, curso: CursoId) -> list[LeccionResumen]:
+def listar_lecciones(
+    request: Request,
+    curso: CursoId,
+) -> list[LeccionResumen] | Response:
     lecciones = leer_lecciones(_config(request), curso)
     if not lecciones:
         return Response(status_code=404)

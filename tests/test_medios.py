@@ -82,3 +82,66 @@ def test_range_fuera_del_archivo(cliente):
     assert respuesta.status_code == 416
     assert respuesta.content == b""
     assert respuesta.headers["content-range"] == "bytes */16"
+
+
+def test_range_con_numero_excesivamente_largo_es_invalido(cliente):
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": RUTA_PREVIA},
+        headers={"Range": f"bytes={'1' * 4301}-"},
+    )
+
+    assert respuesta.status_code == 416
+    assert respuesta.content == b""
+    assert respuesta.headers["content-range"] == "bytes */16"
+
+
+def test_directorio_enlazado_a_mitad_de_ruta_que_sale_de_raiz_devuelve_404(
+    cliente,
+    cfg,
+    tmp_path,
+):
+    directorio_fuera = tmp_path / "fuera"
+    directorio_fuera.mkdir()
+    (directorio_fuera / "secreto.mp4").write_bytes(b"secreto")
+    (cfg.cursos_dir / "enlace-directorio").symlink_to(
+        directorio_fuera,
+        target_is_directory=True,
+    )
+
+    respuesta = cliente.get(
+        "/api/medios",
+        params={"ruta": "cursos/enlace-directorio/secreto.mp4"},
+    )
+
+    assert respuesta.status_code == 404
+
+
+def test_traversal_codificado_en_query_cruda_devuelve_404(cliente):
+    respuesta = cliente.get("/api/medios?ruta=cursos/%2e%2e/secreto.mp4")
+
+    assert respuesta.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "ruta",
+    [
+        r"cursos\REACT\04-importar-y-exportar\previa\previa-v1.mp4",
+        "cursos/REACT/archivo\x00.mp4",
+        "estudio/lecciones/react-04.JSON",
+    ],
+)
+def test_rutas_malformadas_o_extension_prohibida_devuelven_404(cliente, ruta):
+    respuesta = cliente.get("/api/medios", params={"ruta": ruta})
+
+    assert respuesta.status_code == 404
+
+
+def test_enlace_mp4_a_extension_prohibida_dentro_de_raiz_devuelve_404(cliente, cfg):
+    archivo_privado = cfg.cursos_dir / ".env"
+    archivo_privado.write_text("SECRETO=falso", encoding="utf-8")
+    (cfg.cursos_dir / "x.mp4").symlink_to(archivo_privado)
+
+    respuesta = cliente.get("/api/medios", params={"ruta": "cursos/x.mp4"})
+
+    assert respuesta.status_code == 404

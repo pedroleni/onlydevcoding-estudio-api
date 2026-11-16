@@ -9,7 +9,7 @@ from estudio_api.config import Config
 from estudio_api.rutas import ruta_segura
 
 TAMANO_TROZO = 64 * 1024
-PATRON_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+PATRON_RANGE = re.compile(r"^bytes=([0-9]{0,18})-([0-9]{0,18})$")
 TIPOS_MEDIO = {
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
