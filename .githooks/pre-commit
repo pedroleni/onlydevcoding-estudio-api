@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Gate local: bloquea commits con secretos, datos privados o prompt injection
+# CRITICAL/HIGH. Escanea exactamente lo preparado (el índice), no el árbol de
+# trabajo: lo que se va a commitear es lo que cuenta.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+INDICE="$(mktemp -d)"
+trap 'rm -rf "$INDICE"' EXIT
+git checkout-index --all --prefix="$INDICE/"
+
+echo "Ejecutando escaneo de secretos y prompt injection sobre lo preparado..."
+bash scripts/security/scan_secrets.sh "$INDICE"
+bash scripts/security/scan_prompt_injection.sh "$INDICE"
