@@ -109,14 +109,62 @@ Las rutas son relativas a `publicar/`. Un campo que no aplica se omite o va a `n
 
 - [ ] **Step 1: Tests que fallan:**
 ```python
-def test_put_sin_token_401(cliente_con_token): assert cliente_con_token.put("/api/salud").status_code == 401
-def test_put_token_malo_401(cliente_con_token): assert cliente_con_token.put("/api/salud", headers={"X-Estudio-Token": "otro"}).status_code == 401
-def test_put_sin_configurar_503(cliente): assert cliente.put("/api/salud", headers={"X-Estudio-Token": "x"}).status_code == 503
-def test_put_token_bueno_pasa(cliente_con_token): assert cliente_con_token.put("/api/salud", headers={"X-Estudio-Token": TOKEN}).status_code == 405  # pasa el cortafuegos; la ruta solo admite GET
-def test_cuerpo_grande_413(cliente_con_token): assert cliente_con_token.put("/api/salud", headers={"X-Estudio-Token": TOKEN}, content=b"x" * (256 * 1024 + 1)).status_code == 413
-def test_cors_no_permite_put(cliente_con_token): r = cliente_con_token.options("/api/salud", headers={"Origin": "http://127.0.0.1:3000", "Access-Control-Request-Method": "PUT"}); assert "PUT" not in r.headers.get("access-control-allow-methods", "")
-def test_escribir_atomico_copia_una_vez(tmp_path): ...  # dos escrituras → .antes-de-editar conserva el contenido ORIGINAL
-def test_escribir_atomico_fallo_no_trunca(tmp_path, monkeypatch): ...  # os.replace lanza OSError → el archivo conserva su contenido y no quedan temporales
+def test_put_sin_token_401(cliente_con_token):
+    assert cliente_con_token.put("/api/salud").status_code == 401
+
+
+def test_put_token_malo_401(cliente_con_token):
+    assert (
+        cliente_con_token.put(
+            "/api/salud", headers={"X-Estudio-Token": "otro"}
+        ).status_code
+        == 401
+    )
+
+
+def test_put_sin_configurar_503(cliente):
+    assert (
+        cliente.put("/api/salud", headers={"X-Estudio-Token": "x"}).status_code == 503
+    )
+
+
+def test_put_token_bueno_pasa(cliente_con_token):
+    assert (
+        cliente_con_token.put(
+            "/api/salud", headers={"X-Estudio-Token": TOKEN}
+        ).status_code
+        == 405
+    )  # pasa el cortafuegos; la ruta solo admite GET
+
+
+def test_cuerpo_grande_413(cliente_con_token):
+    assert (
+        cliente_con_token.put(
+            "/api/salud",
+            headers={"X-Estudio-Token": TOKEN},
+            content=b"x" * (256 * 1024 + 1),
+        ).status_code
+        == 413
+    )
+
+
+def test_cors_no_permite_put(cliente_con_token):
+    r = cliente_con_token.options(
+        "/api/salud",
+        headers={
+            "Origin": "http://127.0.0.1:3000",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert "PUT" not in r.headers.get("access-control-allow-methods", "")
+
+
+def test_escribir_atomico_copia_una_vez(
+    tmp_path,
+): ...  # dos escrituras → .antes-de-editar conserva el contenido ORIGINAL
+def test_escribir_atomico_fallo_no_trunca(
+    tmp_path, monkeypatch
+): ...  # os.replace lanza OSError → el archivo conserva su contenido y no quedan temporales
 ```
 - [ ] **Step 2:** `uv run pytest -q` → FAIL. **Step 3:** Implementar y documentar en README y en los documentos de seguridad. **Step 4:** PASS, ruff y escáneres en verde.
 - [ ] **Step 5: Commit** `Escrituras protegidas con token y escritura atómica`.

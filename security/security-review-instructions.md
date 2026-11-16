@@ -27,6 +27,17 @@ ruta de explotación concreta.
   ella los medios entre `127.0.0.1:3000` y `127.0.0.1:8000`.
 - CORS no sustituye las comprobaciones de `Host` y `Origin`.
 - La fase 1 es de solo lectura en `CURSOS_DIR` y `ESTUDIO_DIR`.
+- Toda petición distinta de `GET`, `HEAD` y `OPTIONS` exige
+  `X-Estudio-Token`, comparado con `ESTUDIO_TOKEN` mediante
+  `hmac.compare_digest`. Si falta la configuración se devuelve 503; si falta la
+  cabecera o no coincide, 401. Debe haber un único `Content-Length` decimal:
+  sin él o si es inválido se devuelve 411, y por encima de 256 KB, 413. CORS
+  continúa permitiendo solo `GET`.
+- Las únicas escrituras permitidas bajo `CURSOS_DIR` son
+  `publicar/publicacion.json`, `publicar/PUBLICAR-leccion-N.md` y
+  `publicar/PUBLICAR-leccion-N.html` dentro de una lección. Se escriben en un
+  temporal de la misma carpeta, se sustituyen con `os.replace` y conservan una
+  única copia `<archivo>.antes-de-editar`. No se escribe en `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
   contenido reales.
 

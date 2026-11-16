@@ -22,7 +22,11 @@ autenticación: es una decisión explícita.
    `Cross-Origin-Resource-Policy: same-site` (Chromium bloquea con ella los
    medios entre los puertos 3000 y 8000); el freno a otras webs es el rechazo
    de `Sec-Fetch-Site: cross-site`. CORS es una capa adicional, no el control
-   único.
+   único. Toda petición distinta de `GET`, `HEAD` y `OPTIONS` exige
+   `X-Estudio-Token`, comparado con `ESTUDIO_TOKEN` mediante
+   `hmac.compare_digest`; sin token configurado, las escrituras se rechazan.
+   También exige un único `Content-Length` decimal y limita el cuerpo a 256 KB.
+   CORS sigue permitiendo solo `GET`.
 4. **Recorrido de rutas:** valida ids y números, rechaza rutas absolutas y `..`,
    resuelve enlaces simbólicos y comprueba con `Path.is_relative_to()` que el
    destino real sigue bajo `CURSOS_DIR` o `ESTUDIO_DIR`.
@@ -31,6 +35,9 @@ autenticación: es una decisión explícita.
 6. **Subidas:** si existen, limita tamaño, extensión y nombre; escribe en una
    raíz dedicada, evita symlinks y sobrescritura, y no interpreta el contenido.
 7. **Errores:** no exponen rutas locales, variables ni contenido real.
+8. **Escrituras:** solo alcanzan los archivos de publicación permitidos dentro
+   de una lección, usan un temporal en la misma carpeta y `os.replace`, y crean
+   una única copia `<archivo>.antes-de-editar` antes de la primera edición.
 
 Devuelve severidad, CWE/ASI, archivo, línea, escenario explotable y corrección
 concreta. Reporta solo hallazgos que superen el filtro de confianza.

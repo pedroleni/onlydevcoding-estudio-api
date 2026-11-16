@@ -1,3 +1,4 @@
+import hmac
 from collections.abc import Awaitable, Callable
 
 from starlette.datastructures import Headers
@@ -10,12 +11,20 @@ AplicacionASGI = Callable[
 ]
 
 HOSTS_PERMITIDOS = {"127.0.0.1:8000", "localhost:8000"}
+METODOS_LECTURA = {"GET", "HEAD", "OPTIONS"}
+TAMANO_MAXIMO_CUERPO = 256 * 1024
 
 
 class SeguridadLocalMiddleware:
-    def __init__(self, app: AplicacionASGI, origen_web: str) -> None:
+    def __init__(
+        self,
+        app: AplicacionASGI,
+        origen_web: str,
+        token_escritura: str | None,
+    ) -> None:
         self.app = app
         self.origen_web = origen_web
+        self.token_escritura = token_escritura
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         tipo_scope = scope["type"]
@@ -57,6 +66,56 @@ class SeguridadLocalMiddleware:
                 estado=403,
             )
             return
+
+        if tipo_scope == "http" and scope["method"].upper() not in METODOS_LECTURA:
+            if not self.token_escritura:
+                await self._rechazar(
+                    scope,
+                    receive,
+                    send,
+                    mensaje="Escrituras desactivadas: falta ESTUDIO_TOKEN",
+                    estado=503,
+                )
+                return
+
+            token_recibido = cabeceras.get("x-estudio-token")
+            if token_recibido is None or not hmac.compare_digest(
+                token_recibido,
+                self.token_escritura,
+            ):
+                await self._rechazar(
+                    scope,
+                    receive,
+                    send,
+                    mensaje="Token de escritura no válido",
+                    estado=401,
+                )
+                return
+
+            longitudes = cabeceras.getlist("content-length")
+            if (
+                len(longitudes) != 1
+                or not longitudes[0].isascii()
+                or not longitudes[0].isdecimal()
+            ):
+                await self._rechazar(
+                    scope,
+                    receive,
+                    send,
+                    mensaje="Falta Content-Length válido",
+                    estado=411,
+                )
+                return
+
+            if int(longitudes[0]) > TAMANO_MAXIMO_CUERPO:
+                await self._rechazar(
+                    scope,
+                    receive,
+                    send,
+                    mensaje="Cuerpo demasiado grande",
+                    estado=413,
+                )
+                return
 
         await self.app(scope, receive, send)
 

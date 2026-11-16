@@ -25,6 +25,7 @@ def crear_app(config: Config) -> FastAPI:
     aplicacion.add_middleware(
         SeguridadLocalMiddleware,
         origen_web=config.origen_web,
+        token_escritura=config.token_escritura,
     )
     aplicacion.include_router(router_api)
 
