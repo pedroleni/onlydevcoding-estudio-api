@@ -1,3 +1,4 @@
+import codecs
 import json
 import logging
 import os
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 _BLOQUEO = threading.Lock()
 _HILOS: dict[int, threading.Thread] = {}
 _PROGRESO = re.compile(r"(\d+)/(\d+)")
-_SEPARADOR_LINEAS = re.compile(r"[\r\n]+")
 
 
 class Trabajo(BaseModel):
@@ -115,7 +115,7 @@ def _finalizar(
             """
             UPDATE trabajo
             SET estado = ?, progreso = ?, fin = ?, error = ?, registro = ?
-            WHERE id = ?
+            WHERE id = ? AND estado = 'en_marcha'
             """,
             (
                 estado,
@@ -133,10 +133,19 @@ def _borrar_temporal(temporal: Path | None) -> None:
         temporal.unlink(missing_ok=True)
 
 
-def _incorporar_linea(linea: str, registro: list[str], progreso: float) -> float:
+def _incorporar_linea(
+    linea: str,
+    registro: list[str],
+    progreso: float,
+    *,
+    reescribir: bool = False,
+) -> float:
     if not linea:
         return progreso
-    registro.append(linea[:500])
+    if reescribir and registro:
+        registro[-1] = linea[:500]
+    else:
+        registro.append(linea[:500])
     del registro[:-40]
     for coincidencia in _PROGRESO.finditer(linea):
         actual = int(coincidencia.group(1))
@@ -162,6 +171,7 @@ def _ejecutar(
             proceso = subprocess.Popen(
                 comando,
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 shell=False,
@@ -180,20 +190,59 @@ def _ejecutar(
 
         assert proceso.stdout is not None
         pendiente = ""
+        reescribir_pendiente = False
         ultima_escritura = time.monotonic()
-        while trozo := proceso.stdout.read1(4096):
-            pendiente += trozo.decode("utf-8", errors="replace")
-            partes = _SEPARADOR_LINEAS.split(pendiente)
-            pendiente = partes.pop()
-            for linea in partes:
-                progreso = _incorporar_linea(linea, registro, progreso)
-            ahora = time.monotonic()
-            if ahora - ultima_escritura >= 1:
-                _guardar_avance(bd_ruta, trabajo_id, progreso, registro)
-                ultima_escritura = ahora
+        decodificador = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+        def incorporar_texto(texto: str) -> None:
+            nonlocal pendiente, progreso, reescribir_pendiente
+            for caracter in texto:
+                if caracter == "\r":
+                    progreso = _incorporar_linea(
+                        pendiente,
+                        registro,
+                        progreso,
+                        reescribir=reescribir_pendiente,
+                    )
+                    pendiente = ""
+                    reescribir_pendiente = True
+                elif caracter == "\n":
+                    progreso = _incorporar_linea(
+                        pendiente,
+                        registro,
+                        progreso,
+                        reescribir=reescribir_pendiente,
+                    )
+                    pendiente = ""
+                    reescribir_pendiente = False
+                elif len(pendiente) < 500:
+                    pendiente += caracter
+
+        try:
+            while trozo := proceso.stdout.read1(4096):
+                incorporar_texto(decodificador.decode(trozo))
+                ahora = time.monotonic()
+                if ahora - ultima_escritura >= 1:
+                    try:
+                        _guardar_avance(bd_ruta, trabajo_id, progreso, registro)
+                    except Exception:  # noqa: BLE001 -- el avance no debe abortar el render
+                        logger.warning(
+                            "No se pudo guardar el avance del trabajo %s",
+                            trabajo_id,
+                        )
+                    else:
+                        ultima_escritura = ahora
+            incorporar_texto(decodificador.decode(b"", final=True))
+        finally:
+            proceso.stdout.close()
 
         if pendiente:
-            progreso = _incorporar_linea(pendiente, registro, progreso)
+            progreso = _incorporar_linea(
+                pendiente,
+                registro,
+                progreso,
+                reescribir=reescribir_pendiente,
+            )
         codigo = proceso.wait()
         if codigo != 0:
             _borrar_temporal(temporal)
@@ -227,6 +276,28 @@ def _ejecutar(
             registro,
             f"No se pudo completar el trabajo: {exc}",
         )
+
+
+def _ejecutar_y_olvidar(
+    bd_ruta: Path,
+    trabajo_id: int,
+    comando: list[str],
+    cwd: Path,
+    temporal: Path | None,
+    destino: Path | None,
+) -> None:
+    try:
+        _ejecutar(
+            bd_ruta,
+            trabajo_id,
+            comando,
+            cwd,
+            temporal,
+            destino,
+        )
+    finally:
+        with _BLOQUEO:
+            _HILOS.pop(trabajo_id, None)
 
 
 def lanzar(
@@ -275,7 +346,7 @@ def lanzar(
         trabajo = leer_trabajo(bd, trabajo_id)
         assert trabajo is not None
         hilo = threading.Thread(
-            target=_ejecutar,
+            target=_ejecutar_y_olvidar,
             args=(
                 bd_ruta,
                 trabajo_id,
@@ -288,7 +359,28 @@ def lanzar(
             name=f"trabajo-{trabajo_id}",
         )
         _HILOS[trabajo_id] = hilo
-        hilo.start()
+        try:
+            hilo.start()
+        except Exception as error:  # noqa: BLE001 -- cualquier fallo de start se persiste
+            _HILOS.pop(trabajo_id, None)
+            try:
+                _borrar_temporal(temporal)
+            except OSError:
+                logger.exception(
+                    "No se pudo borrar el temporal del trabajo %s",
+                    trabajo_id,
+                )
+            _finalizar(
+                bd_ruta,
+                trabajo_id,
+                "error",
+                0.0,
+                [],
+                f"No se pudo iniciar el hilo del trabajo: {error}",
+            )
+            fallido = leer_trabajo(bd, trabajo_id)
+            assert fallido is not None
+            return fallido
         return trabajo
 
 

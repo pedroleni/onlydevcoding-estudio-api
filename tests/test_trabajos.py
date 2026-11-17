@@ -1,10 +1,13 @@
 import json
+import subprocess
 import sys
+import threading
 from contextlib import closing
 from datetime import datetime
 
 import pytest
 
+import estudio_api.trabajos as modulo_trabajos
 from estudio_api.app import crear_app
 from estudio_api.decisiones import abrir_bd
 from estudio_api.trabajos import (
@@ -153,7 +156,11 @@ def test_salida_con_retorno_de_carro_actualiza_el_progreso(tmp_path):
         [
             sys.executable,
             "-c",
-            "import sys; sys.stdout.buffer.write(b'1/2\\r2/2\\r'); sys.stdout.flush()",
+            (
+                "import sys; "
+                "sys.stdout.buffer.write(b'Preparando\\n1/2\\r2/2\\r'); "
+                "sys.stdout.flush()"
+            ),
         ],
         tmp_path,
         None,
@@ -163,7 +170,262 @@ def test_salida_con_retorno_de_carro_actualiza_el_progreso(tmp_path):
 
     terminado = _leer(ruta_bd, trabajo.id)
     assert terminado.progreso == 1.0
-    assert terminado.registro == ["1/2", "2/2"]
+    assert terminado.registro == ["Preparando", "2/2"]
+
+
+def test_salida_utf8_partida_entre_trozos_se_decodifica_una_sola_vez(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+
+    class SalidaPartida:
+        def __init__(self):
+            self.trozos = [b"Espa\xc3", b"\xb1a\n", b""]
+            self.closed = False
+
+        def read1(self, _tamano):
+            return self.trozos.pop(0)
+
+        def close(self):
+            self.closed = True
+
+    class ProcesoFalso:
+        def __init__(self):
+            self.stdout = SalidaPartida()
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        modulo_trabajos.subprocess, "Popen", lambda *a, **k: ProcesoFalso()
+    )
+    trabajo = lanzar(
+        ruta_bd,
+        "utf8",
+        None,
+        None,
+        ["ejecutable-ficticio"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).registro == ["España"]
+
+
+def test_texto_pendiente_sin_separador_se_recorta_a_500(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    longitudes = []
+    incorporar_real = modulo_trabajos._incorporar_linea
+
+    def incorporar_limitado(linea, registro, progreso, *args, **kwargs):
+        longitudes.append(len(linea))
+        return incorporar_real(linea, registro, progreso, *args, **kwargs)
+
+    monkeypatch.setattr(modulo_trabajos, "_incorporar_linea", incorporar_limitado)
+    trabajo = lanzar(
+        ruta_bd,
+        "pendiente",
+        None,
+        None,
+        [sys.executable, "-c", "print('x' * 2000, end='')"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).registro == ["x" * 500]
+    assert max(longitudes) == 500
+
+
+def test_fallo_al_guardar_avance_no_mata_el_render_y_se_reintenta(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    llamadas = 0
+    guardar_real = modulo_trabajos._guardar_avance
+
+    def guardar_inestable(*args):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            raise OSError("fallo transitorio ficticio")
+        guardar_real(*args)
+
+    tiempos = iter([0.0, 2.0, 4.0])
+    monkeypatch.setattr(modulo_trabajos, "_guardar_avance", guardar_inestable)
+    monkeypatch.setattr(modulo_trabajos.time, "monotonic", lambda: next(tiempos))
+
+    class Salida:
+        def __init__(self):
+            self.trozos = [b"1/2\n", b"2/2\n", b""]
+
+        def read1(self, _tamano):
+            return self.trozos.pop(0)
+
+        def close(self):
+            pass
+
+    class Proceso:
+        stdout = Salida()
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(modulo_trabajos.subprocess, "Popen", lambda *a, **k: Proceso())
+    trabajo = lanzar(
+        ruta_bd,
+        "avance",
+        None,
+        None,
+        ["ejecutable-ficticio"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert llamadas == 2
+    assert terminado.estado == "hecho"
+    assert terminado.progreso == 1.0
+
+
+def test_fallo_al_arrancar_hilo_deja_error_y_libera_bloqueo(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    start_real = threading.Thread.start
+
+    def fallar_start(_hilo):
+        raise RuntimeError("fallo ficticio del hilo")
+
+    monkeypatch.setattr(threading.Thread, "start", fallar_start)
+    fallido = lanzar(
+        ruta_bd,
+        "hilo-roto",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+
+    guardado = _leer(ruta_bd, fallido.id)
+    assert guardado.estado == "error"
+    assert guardado.error is not None
+    monkeypatch.setattr(threading.Thread, "start", start_real)
+
+    siguiente = lanzar(
+        ruta_bd,
+        "siguiente",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(siguiente.id, 5)
+    assert _leer(ruta_bd, siguiente.id).estado == "hecho"
+
+
+def test_finalizar_no_modifica_un_trabajo_ya_interrumpido(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(ruta_bd)) as bd:
+        cursor = bd.execute(
+            "INSERT INTO trabajo (accion, estado, inicio) VALUES (?, ?, ?)",
+            ("interrumpido", "interrumpido", inicio),
+        )
+        bd.commit()
+        trabajo_id = cursor.lastrowid
+
+    modulo_trabajos._finalizar(
+        ruta_bd, trabajo_id, "hecho", 1.0, ["no debe guardarse"], None
+    )
+
+    trabajo = _leer(ruta_bd, trabajo_id)
+    assert trabajo.estado == "interrumpido"
+    assert trabajo.progreso == 0.0
+    assert trabajo.registro == []
+
+
+def test_popen_recibe_stdin_devnull(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    popen_real = subprocess.Popen
+    parametros = {}
+
+    def abrir(*args, **kwargs):
+        parametros.update(kwargs)
+        return popen_real(*args, **kwargs)
+
+    monkeypatch.setattr(modulo_trabajos.subprocess, "Popen", abrir)
+    trabajo = lanzar(
+        ruta_bd,
+        "stdin",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    assert parametros["stdin"] is subprocess.DEVNULL
+
+
+def test_stdout_se_cierra_al_terminar_el_hilo(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    popen_real = subprocess.Popen
+    procesos = []
+
+    def abrir(*args, **kwargs):
+        proceso = popen_real(*args, **kwargs)
+        procesos.append(proceso)
+        return proceso
+
+    monkeypatch.setattr(modulo_trabajos.subprocess, "Popen", abrir)
+    trabajo = lanzar(
+        ruta_bd,
+        "stdout",
+        None,
+        None,
+        [sys.executable, "-c", "print('fin')"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    assert procesos[0].stdout is not None
+    assert procesos[0].stdout.closed
+
+
+def test_hilo_se_borra_del_registro_y_esperar_sigue_siendo_seguro(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    trabajo = lanzar(
+        ruta_bd,
+        "limpieza",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+
+    esperar(trabajo.id, 5)
+    assert trabajo.id not in modulo_trabajos._HILOS
+    esperar(trabajo.id, 5)
 
 
 def test_interrumpir_huerfanos_borra_temporal_y_libera_el_motor(tmp_path):

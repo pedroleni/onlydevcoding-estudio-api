@@ -8,6 +8,7 @@ from estudio_api.decisiones import abrir_bd
 from estudio_api.rutas_api import router as router_api
 from estudio_api.rutas_publicar import router as router_publicar
 from estudio_api.rutas_tareas import router as router_tareas
+from estudio_api.rutas_teleprompter import router as router_teleprompter
 from estudio_api.seguridad import SeguridadLocalMiddleware
 from estudio_api.trabajos import interrumpir_huerfanos
 
@@ -39,6 +40,7 @@ def crear_app(config: Config) -> FastAPI:
     aplicacion.include_router(router_api)
     aplicacion.include_router(router_publicar)
     aplicacion.include_router(router_tareas)
+    aplicacion.include_router(router_teleprompter)
 
     @aplicacion.get("/api/salud")
     def salud() -> dict[str, bool]:

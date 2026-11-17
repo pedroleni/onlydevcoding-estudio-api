@@ -217,6 +217,27 @@ datos_curso = _datos_curso
 _SIN_DATOS: Any = object()
 
 
+def ruta_guion(
+    config: Config,
+    curso: str,
+    numero: int,
+    datos: Any = _SIN_DATOS,
+) -> Path | None:
+    """Ruta del guion ya validado por ``datos_curso``, sin volver a leerlo."""
+    leido = _datos_curso(config, curso) if datos is _SIN_DATOS else datos
+    if leido is None or numero not in leido[2]:
+        return None
+    try:
+        ruta = ruta_segura(
+            config.estudio_dir,
+            "lecciones",
+            f"{curso}-{numero:02d}.json",
+        )
+    except ValueError:
+        return None
+    return ruta if ruta.is_file() else None
+
+
 def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
     if isinstance(numero, bool) or not 1 <= numero <= 999:
         return None

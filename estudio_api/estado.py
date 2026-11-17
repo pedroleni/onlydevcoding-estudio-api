@@ -75,7 +75,7 @@ def _escenas(guion: dict[str, Any] | None, modo: str) -> list[str | None]:
     ]
 
 
-def _voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> bool:
+def voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> bool:
     if escena is None:
         return False
     try:
@@ -85,7 +85,7 @@ def _voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> bo
     return _es_archivo(ruta)
 
 
-def _camara_grabada(
+def camara_grabada(
     config: Config,
     curso: str,
     numero: int,
@@ -196,12 +196,12 @@ def calcular_estado(
     return EstadoLeccion(
         guion=guion is not None,
         voz=Avance(
-            hechas=sum(_voz_grabada(config, carpeta, escena) for escena in escenas_voz),
+            hechas=sum(voz_grabada(config, carpeta, escena) for escena in escenas_voz),
             total=len(escenas_voz),
         ),
         camara=Avance(
             hechas=sum(
-                _camara_grabada(config, curso, numero, carpeta, escena)
+                camara_grabada(config, curso, numero, carpeta, escena)
                 for escena in escenas_camara
             ),
             total=len(escenas_camara),
