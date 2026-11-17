@@ -162,6 +162,86 @@ def test_elegir_portada_persiste_y_desaparece_si_se_borra_el_archivo(
     assert detalle_sin_archivo["estado"]["miniatura"] is None
 
 
+def test_elegir_portada_regenera_una_guia_creada_por_la_app(cliente_con_token, cfg):
+    _escribir_publicacion(cfg)
+    _instalar_script_html(cfg)
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    markdown = publicar / "PUBLICAR-leccion-4.md"
+    markdown.write_text("guía manual inicial", encoding="utf-8")
+    portada_b = publicar / "1-youtube-leccion" / "miniatura-B-ejemplo.jpg"
+    portada_b.write_bytes(b"miniatura B")
+    datos = json.loads((publicar / "publicacion.json").read_text(encoding="utf-8"))
+    datos["piezas"]["leccion"]["portadas"].append(
+        "1-youtube-leccion/miniatura-B-ejemplo.jpg"
+    )
+    (publicar / "publicacion.json").write_text(json.dumps(datos), encoding="utf-8")
+    portada_b_publica = PORTADA_LECCION.replace("miniatura-A", "miniatura-B")
+
+    elegida_a = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": PORTADA_LECCION},
+    )
+    assert elegida_a.status_code == 200
+    guardado = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"titulos": ["Título ficticio"]},
+    )
+    assert guardado.status_code == 200
+    assert "miniatura-A-ejemplo.jpg" in markdown.read_text(encoding="utf-8")
+    assert markdown.with_name(f"{markdown.name}.antes-de-editar").is_file()
+
+    elegida_b = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": portada_b_publica},
+    )
+
+    assert elegida_b.status_code == 200
+    assert elegida_b.json()["aviso"] is None
+    guia = markdown.read_text(encoding="utf-8")
+    assert "miniatura-B-ejemplo.jpg" in guia
+    assert "miniatura-A-ejemplo.jpg" not in guia
+
+
+def test_elegir_portada_no_modifica_una_guia_manual_sin_copia(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    markdown = publicar / "PUBLICAR-leccion-4.md"
+    markdown.write_text("guía manual intacta", encoding="utf-8")
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": PORTADA_LECCION},
+    )
+
+    assert respuesta.status_code == 200
+    assert markdown.read_text(encoding="utf-8") == "guía manual intacta"
+    assert not markdown.with_name(f"{markdown.name}.antes-de-editar").exists()
+
+
+def test_elegir_portada_devuelve_aviso_si_falla_el_html(cliente_con_token, cfg):
+    _escribir_publicacion(cfg)
+    _instalar_script_html(cfg, "raise SystemExit(7)\n")
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    markdown = publicar / "PUBLICAR-leccion-4.md"
+    markdown.write_text("guía anterior", encoding="utf-8")
+    markdown.with_name(f"{markdown.name}.antes-de-editar").write_text(
+        "guía original", encoding="utf-8"
+    )
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": PORTADA_LECCION},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["aviso"] == "No se ha podido regenerar la guía HTML"
+    assert "miniatura-A-ejemplo.jpg" in markdown.read_text(encoding="utf-8")
+
+
 def test_portada_que_no_es_candidata_da_422(cliente_con_token):
     respuesta = cliente_con_token.put(
         f"{RUTA_PUBLICACION}/piezas/leccion/portada",
@@ -374,8 +454,16 @@ def test_guardar_titulo_de_101_caracteres_da_422(cliente_con_token):
     assert "100" in respuesta.text
 
 
-@pytest.mark.parametrize("video", ["/ruta/ficticia.mp4", "../../fuera.mp4"])
-def test_guardar_video_fuera_de_publicar_da_422(cliente_con_token, video):
+@pytest.mark.parametrize(
+    "video",
+    [
+        "1-youtube-leccion/curso-react-04-ejemplo.mp4",
+        "/ruta/ficticia.mp4",
+        "../../fuera.mp4",
+        None,
+    ],
+)
+def test_guardar_textos_rechaza_el_campo_video(cliente_con_token, video):
     respuesta = cliente_con_token.put(
         f"{RUTA_PUBLICACION}/piezas/leccion/redes/linkedin/textos",
         headers={"X-Estudio-Token": TOKEN},
@@ -383,6 +471,44 @@ def test_guardar_video_fuera_de_publicar_da_422(cliente_con_token, video):
     )
 
     assert respuesta.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "video",
+    [
+        "1-youtube-leccion/curso-react-04-ejemplo.mp4",
+        "pendiente/video-linkedin.mp4",
+    ],
+)
+def test_guardar_textos_conserva_el_video_de_la_misma_red(
+    cliente_con_token, cfg, video
+):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    datos = {
+        "version": 1,
+        "piezas": {
+            "leccion": {
+                "redes": {
+                    "linkedin": {
+                        "texto": "Texto anterior",
+                        "video": video,
+                    }
+                }
+            }
+        },
+    }
+    ruta = publicar / "publicacion.json"
+    ruta.write_text(json.dumps(datos), encoding="utf-8")
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/linkedin/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto actualizado"},
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    assert guardado["piezas"]["leccion"]["redes"]["linkedin"]["video"] == video
 
 
 def test_regenerar_html_ejecuta_una_lista_sin_shell(
@@ -400,7 +526,7 @@ def test_regenerar_html_ejecuta_una_lista_sin_shell(
 
         def communicate(self, timeout):
             llamada["timeout"] = timeout
-            Path(self.argumentos[3]).write_text(
+            Path(self.argumentos[4]).write_text(
                 "<html>ficticio</html>", encoding="utf-8"
             )
             return b"salida", b"error"
@@ -426,8 +552,8 @@ def test_regenerar_html_ejecuta_una_lista_sin_shell(
 
     assert respuesta.status_code == 200
     assert isinstance(llamada["argumentos"], list)
-    assert llamada["argumentos"][1] == str(script.resolve())
-    assert llamada["argumentos"][4] == str(
+    assert llamada["argumentos"][1:3] == ["-I", str(script.resolve())]
+    assert llamada["argumentos"][5] == str(
         (
             _carpeta_leccion(cfg)
             / "publicar"
@@ -440,7 +566,42 @@ def test_regenerar_html_ejecuta_una_lista_sin_shell(
     assert llamada["opciones"]["stderr"] is subprocess.PIPE
     assert llamada["opciones"]["start_new_session"] is True
     assert llamada["opciones"]["cwd"] == _carpeta_leccion(cfg) / "publicar"
+    assert set(llamada["opciones"]["env"]) == {"PATH", "HOME", "LANG"}
+    assert "ESTUDIO_TOKEN" not in llamada["opciones"]["env"]
     assert llamada["timeout"] == 60
+
+
+def test_regenerar_html_no_hereda_estudio_token(cliente_con_token, cfg, monkeypatch):
+    _instalar_script_html(cfg)
+    monkeypatch.setenv("ESTUDIO_TOKEN", "secreto-ficticio-que-no-debe-heredarse")
+    entorno = {}
+
+    class ProcesoFalso:
+        pid = 12345
+        returncode = 0
+
+        def __init__(self, argumentos):
+            self.argumentos = argumentos
+
+        def communicate(self, timeout):
+            Path(self.argumentos[4]).write_text("<html></html>", encoding="utf-8")
+            return b"", b""
+
+    def ejecutar(argumentos, **opciones):
+        entorno.update(opciones["env"])
+        return ProcesoFalso(argumentos)
+
+    monkeypatch.setattr("estudio_api.guia.subprocess.Popen", ejecutar)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/linkedin/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 200
+    assert set(entorno) == {"PATH", "HOME", "LANG"}
+    assert "ESTUDIO_TOKEN" not in entorno
 
 
 def test_put_conserva_medios_anotados_aunque_aun_no_existan(cliente_con_token, cfg):
@@ -625,6 +786,44 @@ def test_timeout_mata_el_grupo_del_conversor(cliente_con_token, cfg, monkeypatch
         os.killpg(grupo, 0)
 
 
+def test_timeout_de_recogida_no_cuelga_la_peticion(cliente_con_token, cfg, monkeypatch):
+    _instalar_script_html(cfg)
+    llamadas = []
+
+    class TuberiaFalsa:
+        def __init__(self):
+            self.cerrada = False
+
+        def close(self):
+            self.cerrada = True
+
+    class ProcesoFalso:
+        pid = 12345
+        returncode = None
+        stdout = TuberiaFalsa()
+        stderr = TuberiaFalsa()
+
+        def communicate(self, timeout):
+            llamadas.append(timeout)
+            raise subprocess.TimeoutExpired(["conversor"], timeout)
+
+    proceso = ProcesoFalso()
+    monkeypatch.setattr("estudio_api.guia.subprocess.Popen", lambda *_a, **_k: proceso)
+    monkeypatch.setattr("estudio_api.guia.os.killpg", lambda *_a: None)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["aviso"] == "No se ha podido regenerar la guía HTML"
+    assert llamadas == [60, 5]
+    assert proceso.stdout.cerrada is True
+    assert proceso.stderr.cerrada is True
+
+
 def test_json_guardado_omite_listas_vacias_y_none_sin_perder_version(
     cliente_con_token, cfg
 ):
@@ -641,6 +840,176 @@ def test_json_guardado_omite_listas_vacias_y_none_sin_perder_version(
     assert "titulos" not in datos["piezas"]["leccion"]["redes"]["instagram"]
     assert "ajustes" not in datos["piezas"]["leccion"]["redes"]["instagram"]
     assert "null" not in ruta.read_text(encoding="utf-8")
+
+
+def test_guardar_red_vacia_elimina_la_red_y_la_pieza(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    ruta = publicar / "publicacion.json"
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {"leccion": {"redes": {"tiktok": {"texto": "Antes"}}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/tiktok/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={},
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    assert "leccion" not in guardado["piezas"]
+    assert '"tiktok": {}' not in ruta.read_text(encoding="utf-8")
+
+
+def test_json_guardado_ordena_las_piezas_como_la_vista(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    ruta = publicar / "publicacion.json"
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {
+                    "short-10": {"titulo": "Short diez"},
+                    "reel-salida-2": {"titulo": "Segundo reel"},
+                    "short-2": {"titulo": "Short dos"},
+                    "leccion": {"titulo": "Lección"},
+                    "reel-salida": {"titulo": "Primer reel"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"titulos": ["Título ficticio"]},
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    assert list(guardado["piezas"]) == [
+        "leccion",
+        "reel-salida",
+        "reel-salida-2",
+        "short-2",
+        "short-10",
+    ]
+
+
+def test_json_demasiado_grande_da_422_y_no_escribe(cliente_con_token, cfg, monkeypatch):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    ruta = publicar / "publicacion.json"
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {"leccion": {"titulo": "Título anterior"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    anterior = ruta.read_bytes()
+    monkeypatch.setattr("estudio_api.rutas_publicar.MAX_TAMANO_JSON", 100)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"titulos": ["x" * 50]},
+    )
+
+    assert respuesta.status_code == 422
+    assert ruta.read_bytes() == anterior
+    assert not ruta.with_name(f"{ruta.name}.antes-de-editar").exists()
+
+
+def test_put_rechaza_publicacion_json_como_enlace_colgante(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    destino = publicar / "1-youtube-leccion" / "no-permitido.html"
+    (publicar / "publicacion.json").symlink_to(destino)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert not destino.exists()
+
+
+def test_put_rechaza_markdown_enlazado_a_video(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    destino = publicar / "1-youtube-leccion" / "curso-react-04-ejemplo.mp4"
+    contenido = destino.read_bytes()
+    markdown = publicar / "PUBLICAR-leccion-4.md"
+    markdown.symlink_to(destino)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert destino.read_bytes() == contenido
+
+
+def test_put_rechaza_html_enlazado_a_video(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    destino = publicar / "1-youtube-leccion" / "curso-react-04-ejemplo.mp4"
+    contenido = destino.read_bytes()
+    html = publicar / "PUBLICAR-leccion-4.html"
+    html.symlink_to(destino)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert destino.read_bytes() == contenido
+
+
+def test_put_rechaza_publicar_enlazada_a_otra_leccion(cliente_con_token, cfg):
+    leccion = _carpeta_leccion(cfg)
+    publicar = leccion / "publicar"
+    destino = cfg.cursos_dir / "REACT" / "05-otra" / "publicar"
+    destino.mkdir()
+    shutil.rmtree(publicar)
+    publicar.symlink_to(destino, target_is_directory=True)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert list(destino.iterdir()) == []
+
+
+def test_put_rechaza_publicar_enlazada_a_raiz(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    shutil.rmtree(publicar)
+    publicar.symlink_to(cfg.cursos_dir, target_is_directory=True)
+    nombres_antes = {ruta.name for ruta in cfg.cursos_dir.iterdir()}
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert {ruta.name for ruta in cfg.cursos_dir.iterdir()} == nombres_antes
 
 
 def test_guia_usa_el_mismo_titulo_que_la_vista_si_falta_en_json(cliente_con_token, cfg):

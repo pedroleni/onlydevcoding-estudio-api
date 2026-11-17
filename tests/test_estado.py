@@ -193,8 +193,15 @@ def test_publicado_por_red_exige_todas_las_piezas_previstas():
         {
             "version": 1,
             "piezas": {
-                "leccion": {"redes": {"youtube": {}, "instagram": {}}},
-                "reel-salida": {"redes": {"instagram": {}}},
+                "leccion": {
+                    "redes": {
+                        "youtube": {"descripcion": "Texto ficticio"},
+                        "instagram": {"texto": "Texto ficticio"},
+                    }
+                },
+                "reel-salida": {
+                    "redes": {"instagram": {"texto": "Otro texto ficticio"}}
+                },
             },
         }
     )
@@ -212,3 +219,19 @@ def test_publicado_por_red_exige_todas_las_piezas_previstas():
         "tiktok": False,
         "linkedin": False,
     }
+
+
+def test_publicado_por_red_no_cuenta_redes_vacias():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {"leccion": {"redes": {"tiktok": {}}}},
+        }
+    )
+
+    resultado = publicado_por_red(
+        publicacion,
+        {("leccion", "tiktok"): EstadoRed(estado="publicado")},
+    )
+
+    assert resultado["tiktok"] is False

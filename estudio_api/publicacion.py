@@ -1,3 +1,4 @@
+import os
 import re
 import stat
 from pathlib import Path, PurePosixPath
@@ -20,7 +21,7 @@ MAX_LINEAS = 30
 MAX_CARACTERES_LINEA = 300
 
 
-class TextosRed(BaseModel):
+class _CamposTextosRed(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     titulos: list[str] = Field(default_factory=list)
@@ -29,8 +30,15 @@ class TextosRed(BaseModel):
     texto: str | None = None
     comentario_fijado: str | None = None
     ajustes: list[str] = Field(default_factory=list)
-    video: str | None = None
     notas: str | None = None
+
+
+class TextosRed(_CamposTextosRed):
+    video: str | None = None
+
+
+class TextosRedEditables(_CamposTextosRed):
+    pass
 
 
 class PiezaPublicacion(BaseModel):
@@ -42,6 +50,12 @@ class PiezaPublicacion(BaseModel):
     portadas: list[str] = Field(default_factory=list)
     fecha_propuesta: str | None = None
     redes: dict[Red, TextosRed] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validar_campos_de_una_linea(self) -> Self:
+        _validar_cadena_sin_saltos("titulo", self.titulo)
+        _validar_cadena_sin_saltos("fecha_propuesta", self.fecha_propuesta)
+        return self
 
 
 class Publicacion(BaseModel):
@@ -61,6 +75,7 @@ class Publicacion(BaseModel):
                 validar_textos(red, textos)
 
         _validar_lineas("despues_de_publicar", self.despues_de_publicar)
+        _validar_sin_saltos("despues_de_publicar", self.despues_de_publicar)
         _validar_maximo("notas", self.notas, 2000)
         return self
 
@@ -90,7 +105,12 @@ def _validar_sin_saltos(campo: str, lineas: list[str]) -> None:
         raise ValueError(f"El campo {campo} no admite saltos de línea")
 
 
-def validar_textos(red: Red, textos: TextosRed) -> None:
+def _validar_cadena_sin_saltos(campo: str, valor: str | None) -> None:
+    if valor is not None:
+        _validar_sin_saltos(campo, [valor])
+
+
+def validar_textos(red: Red, textos: _CamposTextosRed) -> None:
     if not _texto_codificable_en_utf8(textos.model_dump(mode="json")):
         raise ValueError("Los textos deben poder codificarse en UTF-8")
 
@@ -115,10 +135,52 @@ def validar_textos(red: Red, textos: TextosRed) -> None:
 
 def _raiz_publicar(config: Config, carpeta: Path) -> Path | None:
     try:
-        relativa = carpeta.resolve().relative_to(config.cursos_dir.resolve())
-        return ruta_segura(config.cursos_dir, *relativa.parts, "publicar")
+        carpeta_resuelta = carpeta.resolve()
+        relativa = carpeta_resuelta.relative_to(config.cursos_dir.resolve())
+        esperada = carpeta_resuelta / "publicar"
+        try:
+            datos = os.lstat(esperada)
+        except FileNotFoundError:
+            datos = None
+        if datos is not None and stat.S_ISLNK(datos.st_mode):
+            return None
+        publicar = ruta_segura(config.cursos_dir, *relativa.parts, "publicar")
+        if publicar != esperada:
+            return None
+        return publicar
     except OSError, ValueError:
         return None
+
+
+def ruta_escritura_segura(publicar: Path, nombre: str) -> Path | None:
+    literal = publicar / nombre
+    try:
+        try:
+            datos = os.lstat(literal)
+        except FileNotFoundError:
+            datos = None
+        if datos is not None and stat.S_ISLNK(datos.st_mode):
+            return None
+        segura = ruta_segura(publicar, nombre)
+    except OSError, ValueError:
+        return None
+    return literal if segura == literal else None
+
+
+def clave_pieza(identificador: str) -> tuple[int, int]:
+    if identificador == "leccion":
+        return (0, 0)
+    if identificador == "reel-salida":
+        return (1, 0)
+    if coincidencia := re.fullmatch(r"reel-salida-([1-9][0-9]*)", identificador):
+        return (1, int(coincidencia.group(1)))
+    coincidencia = re.fullmatch(r"short-([1-9][0-9]*)", identificador)
+    assert coincidencia is not None
+    return (2, int(coincidencia.group(1)))
+
+
+def textos_red_vacios(textos: TextosRed) -> bool:
+    return not textos.model_dump(exclude_none=True, exclude_defaults=True)
 
 
 def _resolver_medio(publicar: Path, relativa: str) -> Path | None:

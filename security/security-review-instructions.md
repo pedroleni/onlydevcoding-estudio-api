@@ -40,18 +40,22 @@ ruta de explotación concreta.
   `publicar/publicacion.json`, `publicar/PUBLICAR-leccion-N.md` y
   `publicar/PUBLICAR-leccion-N.html` dentro de una lección. Se escriben en un
   temporal de la misma carpeta, se sustituyen con `os.replace` y conservan una
-  única copia `<archivo>.antes-de-editar`. No se escribe en `ESTUDIO_DIR`.
+  única copia `<archivo>.antes-de-editar`. La carpeta `publicar` y cada destino
+  deben ser rutas literales, no enlaces simbólicos, aunque el enlace permanezca
+  dentro de `CURSOS_DIR`. No se escribe en `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
   contenido reales.
 - La única ejecución de procesos permitida en esta fase es la llamada concreta
   a `herramientas/publicar/md-a-html.py` para regenerar una guía HTML. Usa
-  `sys.executable` y la ruta fija del script dentro de `ESTUDIO_DIR`, una lista
-  de argumentos, `shell=False`, salida estándar y error capturados, un grupo de
-  procesos propio, un timeout de 60 segundos y `cwd` en la carpeta `publicar/`
-  validada dentro de `CURSOS_DIR`. Si vence el timeout se mata el grupo completo
-  con `os.killpg` y se recoge el proceso. Las rutas de entrada, salida e imagen
-  se validan dentro de esas raíces; la imagen se pasa como ruta absoluta y el
-  HTML se genera en un temporal de `publicar/` y se instala de forma atómica.
+  `sys.executable -I` y la ruta fija del script dentro de `ESTUDIO_DIR`, una
+  lista de argumentos, `shell=False`, un entorno limitado a `PATH`, `HOME` y
+  `LANG`, salida estándar y error capturados, un grupo de procesos propio, un
+  timeout de 60 segundos y `cwd` en la carpeta `publicar/` validada dentro de
+  `CURSOS_DIR`. Si vence el timeout se mata el grupo completo con `os.killpg` y
+  se intenta recoger el proceso durante un máximo adicional de 5 segundos. Las
+  rutas de entrada, salida e imagen se validan dentro de esas raíces; la imagen
+  se pasa como ruta absoluta y el HTML se genera en un temporal de `publicar/`
+  y se instala de forma atómica.
 
 ## Hallazgos prioritarios
 

@@ -287,6 +287,37 @@ def test_limite_despues_de_publicar_invalida_el_archivo(carpeta_publicacion, cfg
     assert lectura.error == "No se ha podido leer publicacion.json"
 
 
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("titulo", "Título ficticio\n## Sección falsa"),
+        ("fecha_propuesta", "2026-11-18\n- Tarea falsa"),
+    ],
+)
+def test_campos_de_pieza_de_una_linea_invalidan_el_archivo(
+    carpeta_publicacion, cfg, campo, valor
+):
+    datos = _publicacion_valida()
+    datos["piezas"]["leccion"][campo] = valor
+    _escribir_publicacion(carpeta_publicacion, datos)
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is None
+    assert lectura.error == "No se ha podido leer publicacion.json"
+
+
+def test_salto_en_despues_de_publicar_invalida_el_archivo(carpeta_publicacion, cfg):
+    datos = _publicacion_valida()
+    datos["despues_de_publicar"] = ["Primera línea\n## Sección falsa"]
+    _escribir_publicacion(carpeta_publicacion, datos)
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is None
+    assert lectura.error == "No se ha podido leer publicacion.json"
+
+
 def test_publicar_symlink_fuera_devuelve_error(carpeta_publicacion, cfg, tmp_path):
     publicar = carpeta_publicacion / "publicar"
     fuera = tmp_path / "publicar-fuera"

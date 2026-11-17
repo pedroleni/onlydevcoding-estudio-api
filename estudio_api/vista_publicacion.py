@@ -1,4 +1,3 @@
-import re
 import sqlite3
 from pathlib import Path
 from typing import Literal
@@ -15,6 +14,7 @@ from estudio_api.publicacion import (
     PiezaPublicacion,
     Red,
     TextosRed,
+    clave_pieza,
     leer_publicacion,
     portadas_candidatas,
     ruta_publica_publicar,
@@ -58,18 +58,6 @@ def _tipo_pieza(identificador: str) -> TipoPieza:
     if identificador.startswith("reel-salida"):
         return "reel"
     return "short"
-
-
-def _clave_pieza(identificador: str) -> tuple[int, int]:
-    if identificador == "leccion":
-        return (0, 0)
-    if identificador == "reel-salida":
-        return (1, 0)
-    if coincidencia := re.fullmatch(r"reel-salida-([1-9][0-9]*)", identificador):
-        return (1, int(coincidencia.group(1)))
-    coincidencia = re.fullmatch(r"short-([1-9][0-9]*)", identificador)
-    assert coincidencia is not None
-    return (2, int(coincidencia.group(1)))
 
 
 def _ruta_json(
@@ -160,7 +148,7 @@ def construir_vista_publicacion(
     publicacion = lectura.publicacion
     piezas_disco = {pieza.id: pieza for pieza in leccion.piezas}
     piezas_json = publicacion.piezas if publicacion is not None else {}
-    identificadores = sorted(set(piezas_disco) | set(piezas_json), key=_clave_pieza)
+    identificadores = sorted(set(piezas_disco) | set(piezas_json), key=clave_pieza)
     elegidas = portadas_elegidas(bd, curso, numero)
     estados_guardados = estados(bd, curso, numero)
 

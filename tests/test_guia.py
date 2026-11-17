@@ -128,3 +128,35 @@ def test_generar_guia_encierra_las_notas_y_no_rompe_secciones_posteriores():
     )
     assert guia.index("#### Notas") < guia.index("## Después de publicar")
     assert "- Comprobar el resultado" in guia
+
+
+def test_generar_guia_escapa_inicios_que_abren_markdown():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {
+                    "titulo": "# Pieza ficticia",
+                    "fecha_propuesta": "> mañana",
+                    "redes": {
+                        "youtube": {
+                            "titulos": ["```título ficticio"],
+                            "ajustes": ["- ajuste ficticio", "1. otro ajuste"],
+                        }
+                    },
+                }
+            },
+            "despues_de_publicar": ["| comprobar"],
+        }
+    )
+
+    guia = generar_guia(publicacion, "# Curso ficticio", 4, {})
+
+    assert guia.startswith("# Publicar la lección 4 de \\# Curso ficticio\n")
+    assert "## \\# Pieza ficticia" in guia
+    assert "- Fecha propuesta: \\> mañana" in guia
+    assert "\\```título ficticio (recomendado)" in guia
+    assert "- \\- ajuste ficticio" in guia
+    assert "- 1\\. otro ajuste" in guia
+    assert "- \\| comprobar" in guia
+    assert "\n```título ficticio (recomendado)\n" not in guia

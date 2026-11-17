@@ -25,9 +25,12 @@ def publicado_por_red(
     if publicacion is None:
         previstas["youtube"].append(("leccion", "youtube"))
     else:
+        from estudio_api.publicacion import textos_red_vacios
+
         for pieza, datos in publicacion.piezas.items():
-            for red in datos.redes:
-                previstas[red].append((pieza, red))
+            for red, textos in datos.redes.items():
+                if not textos_red_vacios(textos):
+                    previstas[red].append((pieza, red))
 
     return {
         red: bool(pares)
