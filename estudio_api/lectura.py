@@ -215,8 +215,22 @@ def _datos_curso(
         None,
     )
     if encontrado is None:
-        return None
-    _, carpeta_curso, carpetas = encontrado
+        carpeta_curso = next(
+            (
+                carpeta
+                for carpeta in _entradas_seguras(
+                    config.cursos_dir,
+                    config.cursos_dir.resolve(),
+                )
+                if carpeta.is_dir() and carpeta.name.lower() == curso
+            ),
+            None,
+        )
+        if carpeta_curso is None:
+            return None
+        carpetas = _carpetas_leccion(config.cursos_dir, carpeta_curso)
+    else:
+        _, carpeta_curso, carpetas = encontrado
     guiones = _guiones_curso(config, curso, carpeta_curso.name)
     return carpeta_curso, carpetas, guiones
 
@@ -363,15 +377,14 @@ def leer_lecciones(
 
 def _tiempos_montaje(
     config: Config,
-    curso: str,
-    numero: int,
+    identificador_guion: str,
 ) -> tuple[dict[str, tuple[float, float]], float | None]:
     try:
         ruta = ruta_segura(
             config.estudio_dir,
             "public",
             "lecciones",
-            f"{curso}-{numero:02d}",
+            identificador_guion,
             "montaje.json",
         )
     except ValueError:
@@ -745,7 +758,10 @@ def leer_leccion(
     guion = guiones[numero][2] if numero in guiones else None
     titulo = _texto(guion.get("titulo")) if guion else ""
     titulo = titulo or _titulo_desde_slug(slug)
-    tiempos, duracion = _tiempos_montaje(config, curso, numero)
+    identificador_guion = (
+        guiones[numero][3].stem if numero in guiones else f"{curso}-{numero:02d}"
+    )
+    tiempos, duracion = _tiempos_montaje(config, identificador_guion)
     piezas = _piezas(config, carpeta, titulo)
     publicacion, estados_publicacion, miniatura = _decisiones_publicacion(
         config,

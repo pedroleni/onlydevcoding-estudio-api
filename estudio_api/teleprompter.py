@@ -244,9 +244,13 @@ def _leer_montaje(
     if not isinstance(datos_escenas, list):
         return None
 
+    escenas_guion = guion.get("escenas")
+    if not isinstance(escenas_guion, list):
+        return None
+
     modos = {
         escena.get("id"): escena.get("modo")
-        for escena in guion.get("escenas", [])
+        for escena in escenas_guion
         if isinstance(escena, dict)
         and isinstance(escena.get("id"), str)
         and escena.get("modo") in {"voz", "camara", "animacion"}

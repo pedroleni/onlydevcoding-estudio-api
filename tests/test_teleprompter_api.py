@@ -190,6 +190,26 @@ def test_montaje_roto_se_devuelve_como_null(teleprompter):
     assert respuesta.json()["montaje"] is None
 
 
+@pytest.mark.parametrize("escenas", [None, 5, {"E03": {"modo": "voz"}}])
+def test_guion_con_escenas_que_no_son_lista_no_provoca_500_en_get_ni_post(
+    teleprompter, escenas
+):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta_guion = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta_guion.read_text(encoding="utf-8"))
+    guion["escenas"] = escenas
+    ruta_guion.write_text(json.dumps(guion), encoding="utf-8")
+
+    respuesta_get = cliente.get(RUTA_TELEPROMPTER)
+    respuesta_post = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+
+    assert respuesta_get.status_code == 200
+    assert respuesta_get.json()["escenas"] == []
+    assert respuesta_get.json()["montaje"] is None
+    assert respuesta_post.status_code == 409
+    assert respuesta_post.json()["detail"] == "Esta lección aún no tiene montaje"
+
+
 @pytest.mark.parametrize(
     "montaje",
     [

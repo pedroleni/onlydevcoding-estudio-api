@@ -16,6 +16,14 @@ from estudio_api.teleprompter import (
     ruta_montaje,
     rutas_previa,
 )
+from estudio_api.tomas import (
+    EscenaNoEsVoz,
+    EscenaNoExiste,
+    LeccionSinGuion,
+    TomaGuardada,
+    WavInvalido,
+    guardar_toma,
+)
 from estudio_api.trabajos import (
     Trabajo,
     TrabajoEnMarcha,
@@ -25,6 +33,7 @@ from estudio_api.trabajos import (
 
 router = APIRouter(prefix="/api")
 TrabajoId = Annotated[int, Path(ge=1, le=2**63 - 1)]
+EscenaId = Annotated[str, Path(pattern=r"^E[0-9]{2}$")]
 
 
 class PeticionPrevia(BaseModel):
@@ -50,6 +59,59 @@ def obtener_teleprompter(
     if teleprompter is None:
         return Response(status_code=404)
     return teleprompter
+
+
+@router.put(
+    "/cursos/{curso}/lecciones/{numero}/grabaciones/{escena}",
+    response_model=TomaGuardada,
+    status_code=status.HTTP_201_CREATED,
+)
+async def subir_toma_voz(
+    request: Request,
+    curso: CursoId,
+    numero: NumeroLeccion,
+    escena: EscenaId,
+) -> TomaGuardada:
+    if request.headers.get("content-type") != "audio/wav":
+        raise HTTPException(
+            status_code=415,
+            detail="La toma tiene que ser un WAV (audio/wav)",
+        )
+    longitud = int(request.headers["content-length"])
+    try:
+        return await guardar_toma(
+            _config(request),
+            curso,
+            numero,
+            escena,
+            request.stream(),
+            longitud,
+        )
+    except LeccionSinGuion as error:
+        raise HTTPException(
+            status_code=404,
+            detail="La lección no existe",
+        ) from error
+    except EscenaNoExiste as error:
+        raise HTTPException(
+            status_code=404,
+            detail="La escena no existe en el guion",
+        ) from error
+    except EscenaNoEsVoz as error:
+        raise HTTPException(
+            status_code=422,
+            detail="Esa escena no se graba con voz",
+        ) from error
+    except WavInvalido as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El archivo no es un WAV válido",
+        ) from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No se ha podido guardar la toma",
+        ) from error
 
 
 @router.post(

@@ -155,6 +155,37 @@ def test_escenas_con_textos_y_tiempos(cfg):
     assert leccion.escenas[2].textos == []
 
 
+def test_tiempos_usan_el_nombre_real_del_guion_elegido(cfg):
+    guion_dos_digitos = cfg.estudio_dir / "lecciones" / "react-04.json"
+    guion_tres_digitos = cfg.estudio_dir / "lecciones" / "react-004.json"
+    guion_tres_digitos.write_bytes(guion_dos_digitos.read_bytes())
+    montaje_tres_digitos = (
+        cfg.estudio_dir / "public" / "lecciones" / "react-004" / "montaje.json"
+    )
+    montaje_tres_digitos.parent.mkdir(parents=True)
+    montaje_tres_digitos.write_text(
+        json.dumps(
+            {
+                "fps": 10,
+                "duracion": 100,
+                "escenas": [
+                    {"id": "E01", "duracion": 20},
+                    {"id": "E03", "duracion": 50},
+                    {"id": "E04", "duracion": 30},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert leccion.duracion_s == 10.0
+    escena = next(escena for escena in leccion.escenas if escena.id == "E03")
+    assert (escena.inicio_s, escena.duracion_s) == (2.0, 5.0)
+
+
 @pytest.mark.parametrize(
     "fps",
     [float("inf"), float("nan"), 0, -1, 0.000_001, 1001],

@@ -1,4 +1,5 @@
 import hmac
+import re
 from collections.abc import Awaitable, Callable
 
 from starlette.datastructures import Headers
@@ -14,6 +15,16 @@ HOSTS_PERMITIDOS = {"127.0.0.1:8000", "localhost:8000"}
 METODOS_LECTURA = {"GET", "HEAD", "OPTIONS"}
 TAMANO_MAXIMO_CUERPO = 256 * 1024
 MAXIMO_DIGITOS_CONTENT_LENGTH = 7
+LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int]] = [
+    (
+        "PUT",
+        re.compile(
+            r"^/api/cursos/[a-z0-9-]{1,40}/lecciones/"
+            r"[1-9][0-9]{0,2}/grabaciones/E[0-9]{2}$"
+        ),
+        209_715_200,
+    )
+]
 
 
 class _CuerpoDemasiadoGrande(Exception):
@@ -108,6 +119,16 @@ class SeguridadLocalMiddleware:
                 return
 
         if tipo_scope == "http" and scope["method"].upper() not in METODOS_LECTURA:
+            metodo = scope["method"].upper()
+            ruta = scope.get("path", "")
+            limite_cuerpo = TAMANO_MAXIMO_CUERPO
+            maximo_digitos = MAXIMO_DIGITOS_CONTENT_LENGTH
+            for metodo_limite, patron, limite in LIMITES_POR_RUTA:
+                if metodo == metodo_limite and patron.fullmatch(ruta):
+                    limite_cuerpo = limite
+                    maximo_digitos = 9
+                    break
+
             if _valores_cabecera(scope, b"transfer-encoding"):
                 await self._rechazar(
                     scope,
@@ -133,7 +154,7 @@ class SeguridadLocalMiddleware:
                 )
                 return
 
-            if len(longitudes[0]) > MAXIMO_DIGITOS_CONTENT_LENGTH:
+            if len(longitudes[0]) > maximo_digitos:
                 await self._rechazar(
                     scope,
                     receive,
@@ -144,7 +165,7 @@ class SeguridadLocalMiddleware:
                 return
 
             longitud_declarada = int(longitudes[0])
-            if longitud_declarada > TAMANO_MAXIMO_CUERPO:
+            if longitud_declarada > limite_cuerpo:
                 await self._rechazar(
                     scope,
                     receive,
@@ -162,7 +183,7 @@ class SeguridadLocalMiddleware:
                 if mensaje["type"] == "http.request":
                     bytes_recibidos += len(mensaje.get("body", b""))
                     if (
-                        bytes_recibidos > TAMANO_MAXIMO_CUERPO
+                        bytes_recibidos > limite_cuerpo
                         or bytes_recibidos > longitud_declarada
                     ):
                         raise _CuerpoDemasiadoGrande
