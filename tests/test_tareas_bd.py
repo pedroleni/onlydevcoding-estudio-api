@@ -303,7 +303,7 @@ def test_comprobar_y_borrar_es_atomico_frente_a_otra_escritura(
                     ),
                 )
                 bd.commit()
-        except sqlite3.OperationalError as error:
+        except sqlite3.Error as error:
             error_escritura.append(error)
         finally:
             escritor_terminado.set()
@@ -321,6 +321,7 @@ def test_comprobar_y_borrar_es_atomico_frente_a_otra_escritura(
     assert resultado in (["borrado"], ["en_uso"])
     with closing(sqlite3.connect(ruta_bd)) as bd:
         tareas = bd.execute("SELECT COUNT(*) FROM tarea").fetchone()[0]
+        tareas_huerfanas = bd.execute("PRAGMA foreign_key_check").fetchall()
         tabla = "tipo_tarea" if objetivo == "tipo" else "curso_app"
         identificador = "preparar" if objetivo == "tipo" else "python"
         existe = bd.execute(
@@ -333,4 +334,8 @@ def test_comprobar_y_borrar_es_atomico_frente_a_otra_escritura(
     else:
         assert tareas == 1
         assert existe is not None
-    assert len(error_escritura) <= 1
+    assert not any(
+        isinstance(error, sqlite3.IntegrityError)
+        for error in [*error_borrado, *error_escritura]
+    )
+    assert tareas_huerfanas == []

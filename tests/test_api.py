@@ -2,8 +2,15 @@ from contextlib import closing
 
 import pytest
 
+from estudio_api import rutas_api
 from estudio_api.decisiones import abrir_bd
-from estudio_api.tareas import EnlaceTarea, TareaNueva, crear_tarea
+from estudio_api.tareas import (
+    CursoApp,
+    EnlaceTarea,
+    TareaNueva,
+    crear_curso_app,
+    crear_tarea,
+)
 from tests.ayudas import TOKEN
 from tests.test_publicar_api import RUTA_PUBLICACION, _carpeta_leccion
 
@@ -78,6 +85,23 @@ def test_alta_curso_rechaza_ids_que_ya_existen_en_la_app(cliente_con_token):
     assert respuesta.status_code == 409
 
 
+def test_alta_curso_no_lee_los_guiones_para_comprobar_si_existe(
+    cliente_con_token, monkeypatch
+):
+    def fallar_si_lee_cursos(*_args, **_kwargs):
+        raise AssertionError("POST /api/cursos no debe leer los guiones")
+
+    monkeypatch.setattr(rutas_api, "leer_cursos", fallar_si_lee_cursos)
+
+    respuesta = cliente_con_token.post(
+        "/api/cursos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"id": "python", "nombre": "Python"},
+    )
+
+    assert respuesta.status_code == 201
+
+
 def test_alta_curso_sin_token_devuelve_401(cliente_con_token):
     respuesta = cliente_con_token.post(
         "/api/cursos",
@@ -87,8 +111,22 @@ def test_alta_curso_sin_token_devuelve_401(cliente_con_token):
     assert respuesta.status_code == 401
 
 
-def test_curso_app_no_tiene_lecciones_y_un_curso_inexistente_da_404(
-    cliente_con_token,
+def test_carpeta_de_curso_vacia_sin_alta_devuelve_lista_de_lecciones_vacia(
+    cliente_con_token, cfg
+):
+    (cfg.cursos_dir / "VACIO").mkdir()
+
+    respuesta = cliente_con_token.get("/api/cursos/vacio/lecciones")
+
+    assert respuesta.status_code == 200
+    assert respuesta.json() == []
+    assert "vacio" not in {
+        curso["id"] for curso in cliente_con_token.get("/api/cursos").json()
+    }
+
+
+def test_curso_app_con_carpeta_vacia_posterior_devuelve_lecciones_vacias(
+    cliente_con_token, cfg
 ):
     alta = cliente_con_token.post(
         "/api/cursos",
@@ -96,12 +134,21 @@ def test_curso_app_no_tiene_lecciones_y_un_curso_inexistente_da_404(
         json={"id": "python", "nombre": "Python"},
     )
     assert alta.status_code == 201
+    (cfg.cursos_dir / "PYTHON").mkdir()
 
     respuesta = cliente_con_token.get("/api/cursos/python/lecciones")
+
     assert respuesta.status_code == 200
     assert respuesta.json() == []
-    assert cliente_con_token.get("/api/cursos/no-existe/lecciones").status_code == 404
     assert cliente_con_token.get("/api/cursos/python/lecciones/1").status_code == 404
+
+
+def test_curso_inexistente_sigue_devolviendo_404_al_listar_lecciones(
+    cliente_con_token,
+):
+    respuesta = cliente_con_token.get("/api/cursos/no-existe/lecciones")
+
+    assert respuesta.status_code == 404
 
 
 def test_curso_app_que_aparece_en_disco_se_lista_una_vez(cliente_con_token, cfg):
@@ -119,6 +166,20 @@ def test_curso_app_que_aparece_en_disco_se_lista_una_vez(cliente_con_token, cfg)
     assert len(python) == 1
     assert python[0]["en_disco"] is True
     assert python[0]["carpeta"] == "cursos/PYTHON"
+
+
+def test_curso_app_que_coincide_con_curso_de_disco_con_lecciones_no_se_duplica(
+    cliente_con_token, cfg
+):
+    with closing(abrir_bd(cfg.bd_ruta)) as bd:
+        crear_curso_app(bd, CursoApp(id="react", nombre="React desde la app"))
+
+    cursos = cliente_con_token.get("/api/cursos").json()
+    react = [curso for curso in cursos if curso["id"] == "react"]
+
+    assert len(react) == 1
+    assert react[0]["en_disco"] is True
+    assert react[0]["lecciones"] == 2
 
 
 def test_borrar_curso_app_con_tarea_da_409_y_sin_tarea_da_204(cliente_con_token, cfg):

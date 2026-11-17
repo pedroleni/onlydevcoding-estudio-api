@@ -15,7 +15,12 @@ from estudio_api.lectura import (
 )
 from estudio_api.medios import servir_medio
 from estudio_api.modelos import Curso, Leccion, LeccionResumen
-from estudio_api.tareas import CursoApp, borrar_curso_app, crear_curso_app
+from estudio_api.tareas import (
+    CursoApp,
+    borrar_curso_app,
+    crear_curso_app,
+    cursos_app,
+)
 
 router = APIRouter(prefix="/api")
 CursoId = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,40}$")]
@@ -38,7 +43,7 @@ def dar_de_alta_curso(request: Request, curso: CursoApp) -> Curso:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         if curso_en_disco(config, curso.id) or curso.id in {
-            existente.id for existente in leer_cursos(config, bd)
+            existente.id for existente in cursos_app(bd)
         }:
             raise HTTPException(status_code=409, detail="El curso ya existe")
         try:
@@ -73,7 +78,8 @@ def listar_lecciones(
 ) -> list[LeccionResumen] | Response:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
-        if curso not in {existente.id for existente in leer_cursos(config, bd)}:
+        existe_en_app = curso in {existente.id for existente in cursos_app(bd)}
+        if not curso_en_disco(config, curso) and not existe_en_app:
             return Response(status_code=404)
         lecciones = leer_lecciones(config, curso, bd)
     return lecciones
