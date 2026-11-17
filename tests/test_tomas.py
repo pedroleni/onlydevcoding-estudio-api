@@ -517,8 +517,18 @@ def test_un_fsync_fallido_no_cierra_dos_veces_el_descriptor(tomas, monkeypatch):
         cierres.append(descriptor)
         close_real(descriptor)
 
-    monkeypatch.setattr("estudio_api.tomas.os.fsync", fsync_con_fallo)
-    monkeypatch.setattr("estudio_api.tomas.os.close", close_contado)
+    class OsDeTomas:
+        # Solo cuenta los cierres que hace tomas.py, no los de asyncio, que en
+        # Linux reutilizan los mismos números de descriptor.
+        fsync = staticmethod(fsync_con_fallo)
+        close = staticmethod(close_contado)
+
+        def __getattr__(self, nombre):
+            return getattr(os, nombre)
+
+    import estudio_api.tomas as modulo_tomas
+
+    monkeypatch.setattr(modulo_tomas, "os", OsDeTomas())
 
     async def completo():
         yield cuerpo
@@ -535,10 +545,7 @@ def test_un_fsync_fallido_no_cierra_dos_veces_el_descriptor(tomas, monkeypatch):
             )
         )
 
-    # El parche de os.close es global: en Linux asyncio también cierra
-    # descriptores propios. Lo que importa es que ninguno se cierre dos veces.
-    assert cierres
-    assert len(cierres) == len(set(cierres))
+    assert len(cierres) == 1
     assert [ruta for ruta in grabaciones.iterdir() if ruta.name.startswith(".")] == []
 
 
