@@ -106,6 +106,18 @@ def _cursos_en_disco(
     return sorted(cursos, key=lambda curso: curso[0])
 
 
+def ids_cursos_en_disco(config: Config) -> set[str]:
+    """Cursos de disco con el mismo criterio que el listado: carpeta con lecciones."""
+    return {identificador for identificador, _, _ in _cursos_en_disco(config)}
+
+
+def curso_existe(config: Config, bd: sqlite3.Connection, curso: str) -> bool:
+    """El mismo criterio que el listado: curso de disco con lecciones o dado de alta en la app."""
+    return curso in ids_cursos_en_disco(config) or any(
+        existente.id == curso for existente in cursos_app(bd)
+    )
+
+
 def curso_en_disco(config: Config, curso: str) -> bool:
     if PATRON_ID_CURSO.fullmatch(curso) is None:
         return False
@@ -200,13 +212,18 @@ def _datos_curso(
     return carpeta_curso, carpetas, guiones
 
 
+# Lectura completa de un curso (carpetas y guiones), reutilizable dentro de una petición.
+datos_curso = _datos_curso
+_SIN_DATOS: Any = object()
+
+
 def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
     if isinstance(numero, bool) or not 1 <= numero <= 999:
         return None
-    datos_curso = _datos_curso(config, curso)
-    if datos_curso is None:
+    leido = _datos_curso(config, curso)
+    if leido is None:
         return None
-    _, carpetas, _ = datos_curso
+    _, carpetas, _ = leido
     datos_carpeta = carpetas.get(numero)
     return datos_carpeta[1] if datos_carpeta is not None else None
 
@@ -277,11 +294,12 @@ def leer_lecciones(
     config: Config,
     curso: str,
     bd: sqlite3.Connection | None = None,
+    datos: Any = _SIN_DATOS,
 ) -> list[LeccionResumen]:
-    datos_curso = _datos_curso(config, curso)
-    if datos_curso is None:
+    leido = _datos_curso(config, curso) if datos is _SIN_DATOS else datos
+    if leido is None:
         return []
-    _, carpetas, guiones = datos_curso
+    _, carpetas, guiones = leido
 
     lecciones: list[LeccionResumen] = []
     for numero in sorted(set(carpetas) | set(guiones)):
@@ -688,13 +706,14 @@ def leer_leccion(
     curso: str,
     numero: int,
     bd: sqlite3.Connection | None = None,
+    datos: Any = _SIN_DATOS,
 ) -> Leccion | None:
     if isinstance(numero, bool) or not 1 <= numero <= 999:
         return None
-    datos_curso = _datos_curso(config, curso)
-    if datos_curso is None:
+    leido = _datos_curso(config, curso) if datos is _SIN_DATOS else datos
+    if leido is None:
         return None
-    _, carpetas, guiones = datos_curso
+    _, carpetas, guiones = leido
     if numero not in carpetas and numero not in guiones:
         return None
 

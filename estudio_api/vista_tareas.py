@@ -1,17 +1,17 @@
 import sqlite3
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from estudio_api.config import Config
 from estudio_api.lectura import (
-    carpeta_leccion,
-    curso_en_disco,
+    datos_curso,
     leer_cursos,
     leer_leccion,
     leer_lecciones,
 )
 from estudio_api.modelos import Curso, Leccion, LeccionResumen
-from estudio_api.tareas import Tarea, cursos_app
+from estudio_api.tareas import Tarea
 
 
 class EnlaceVista(BaseModel):
@@ -35,47 +35,40 @@ class TareasDelRango(BaseModel):
 
 
 class _CacheEnlaces:
+    """Resuelve los enlaces leyendo cada curso una sola vez por petición."""
+
     def __init__(self, config: Config, bd: sqlite3.Connection) -> None:
         self.config = config
         self.bd = bd
         self._cursos: dict[str, Curso] | None = None
-        self._cursos_app: dict[str, str] | None = None
+        self._datos: dict[str, Any] = {}
         self._lecciones: dict[str, dict[int, LeccionResumen]] = {}
         self._detalles: dict[tuple[str, int], Leccion | None] = {}
-        self._carpetas: dict[tuple[str, int], bool] = {}
 
     def _curso(self, identificador: str) -> Curso | None:
+        # Mismo criterio que el listado de cursos y que la validación al crear.
         if self._cursos is None:
             try:
                 cursos = leer_cursos(self.config, self.bd)
             except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
                 cursos = []
             self._cursos = {curso.id: curso for curso in cursos}
-        curso = self._cursos.get(identificador)
-        if curso is not None:
-            return curso
+        return self._cursos.get(identificador)
 
-        if self._cursos_app is None:
-            self._cursos_app = {curso.id: curso.nombre for curso in cursos_app(self.bd)}
-        nombre_app = self._cursos_app.get(identificador)
-        en_disco = curso_en_disco(self.config, identificador)
-        if not en_disco and nombre_app is None:
-            return None
-
-        curso = Curso(
-            id=identificador,
-            nombre=nombre_app or identificador,
-            carpeta=None,
-            lecciones=0,
-            en_disco=en_disco,
-        )
-        self._cursos[identificador] = curso
-        return curso
+    def _datos_de(self, curso: str) -> Any:
+        if curso not in self._datos:
+            try:
+                self._datos[curso] = datos_curso(self.config, curso)
+            except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
+                self._datos[curso] = None
+        return self._datos[curso]
 
     def _resumenes(self, curso: str) -> dict[int, LeccionResumen]:
         if curso not in self._lecciones:
             try:
-                lecciones = leer_lecciones(self.config, curso, self.bd)
+                lecciones = leer_lecciones(
+                    self.config, curso, self.bd, datos=self._datos_de(curso)
+                )
             except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
                 lecciones = []
             self._lecciones[curso] = {leccion.numero: leccion for leccion in lecciones}
@@ -86,25 +79,11 @@ class _CacheEnlaces:
         if clave not in self._detalles:
             try:
                 self._detalles[clave] = leer_leccion(
-                    self.config,
-                    curso,
-                    numero,
-                    self.bd,
+                    self.config, curso, numero, self.bd, datos=self._datos_de(curso)
                 )
             except Exception:  # noqa: BLE001 - un guion corrupto no tumba el listado.
                 self._detalles[clave] = None
         return self._detalles[clave]
-
-    def _tiene_carpeta(self, curso: str, numero: int) -> bool:
-        clave = (curso, numero)
-        if clave not in self._carpetas:
-            try:
-                self._carpetas[clave] = (
-                    carpeta_leccion(self.config, curso, numero) is not None
-                )
-            except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
-                self._carpetas[clave] = False
-        return self._carpetas[clave]
 
     def tarea(self, tarea: Tarea) -> TareaVista:
         enlace = tarea.enlace
@@ -117,15 +96,15 @@ class _CacheEnlaces:
         pieza_titulo = None
         roto = curso is None
 
-        if enlace.numero is not None:
+        if enlace.numero is not None and curso is not None:
+            # Una lección que solo tiene guion sigue siendo válida: aún se prepara.
             resumen = self._resumenes(enlace.curso).get(enlace.numero)
-            tiene_carpeta = self._tiene_carpeta(enlace.curso, enlace.numero)
-            if resumen is None or not tiene_carpeta:
+            if resumen is None:
                 roto = True
             else:
                 leccion_titulo = resumen.titulo
 
-            if enlace.pieza is not None and tiene_carpeta:
+            if enlace.pieza is not None and resumen is not None:
                 detalle = self._detalle(enlace.curso, enlace.numero)
                 if detalle is None:
                     roto = True

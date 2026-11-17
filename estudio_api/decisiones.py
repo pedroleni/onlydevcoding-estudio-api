@@ -1,6 +1,8 @@
 import logging
+import os
 import sqlite3
-from contextlib import nullcontext
+import tempfile
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -112,6 +114,22 @@ def _crear_tablas_tareas(bd: sqlite3.Connection) -> None:
     )
 
 
+def _copia_antes_de_migrar(bd: sqlite3.Connection, ruta: Path) -> None:
+    """Guarda la base v1 en <ruta>.v1 antes de migrar; el código de la fase 2 no abre una v2."""
+    destino = ruta.with_name(f"{ruta.name}.v1")
+    if destino.exists():
+        return
+    descriptor, nombre = tempfile.mkstemp(prefix=f".{ruta.name}.v1.", dir=ruta.parent)
+    os.close(descriptor)
+    temporal = Path(nombre)
+    try:
+        with closing(sqlite3.connect(temporal)) as copia:
+            bd.backup(copia)
+        os.replace(temporal, destino)
+    finally:
+        temporal.unlink(missing_ok=True)
+
+
 def abrir_bd(ruta: Path) -> sqlite3.Connection:
     ruta.parent.mkdir(parents=True, exist_ok=True)
     bd = sqlite3.connect(ruta)
@@ -122,6 +140,11 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
             return bd
         if version not in (0, 1):
             raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
+
+        if version == 1:
+            # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
+            # por su propia conexión.
+            _copia_antes_de_migrar(bd, ruta)
 
         aislamiento_anterior = bd.isolation_level
         bd.isolation_level = None

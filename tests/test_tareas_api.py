@@ -188,8 +188,13 @@ def test_curso_sin_carpeta_solo_se_enlaza_a_nivel_de_curso(cliente_con_token, cf
     }
 
 
-def test_enlace_a_carpeta_de_curso_vacia_no_esta_roto(cliente_con_token, cfg):
+def test_enlace_a_curso_de_la_app_con_carpeta_vacia_no_esta_roto(
+    cliente_con_token, cfg
+):
+    # Mismo criterio que el listado: la carpeta vacía cuenta porque el curso está dado de alta.
     (cfg.cursos_dir / "VACIO").mkdir()
+    with closing(abrir_bd(cfg.bd_ruta)) as bd:
+        crear_curso_app(bd, CursoApp(id="vacio", nombre="Vacío"))
 
     respuesta = cliente_con_token.post(
         "/api/tareas",
@@ -199,7 +204,7 @@ def test_enlace_a_carpeta_de_curso_vacia_no_esta_roto(cliente_con_token, cfg):
 
     assert respuesta.status_code == 201
     assert respuesta.json()["enlace_vista"] == {
-        "curso_nombre": "vacio",
+        "curso_nombre": "Vacío",
         "leccion_titulo": None,
         "pieza_titulo": None,
         "roto": False,
@@ -277,9 +282,10 @@ def test_enlace_a_pieza_borrada_se_conserva_como_roto(cliente, cfg):
 
 
 def test_enlace_a_leccion_renombrada_se_conserva_como_roto(cliente, cfg):
+    # El guion mantiene la lección en el listado, pero el reel vivía en la carpeta.
     tarea = _crear_en_bd(
         cfg,
-        enlace={"curso": "react", "numero": 4, "pieza": "leccion"},
+        enlace={"curso": "react", "numero": 4, "pieza": "reel-salida"},
     )
     origen = cfg.cursos_dir / "REACT" / "04-importar-y-exportar"
     origen.rename(cfg.cursos_dir / "REACT" / "06-renombrada")
@@ -292,7 +298,7 @@ def test_enlace_a_leccion_renombrada_se_conserva_como_roto(cliente, cfg):
     assert respuesta.status_code == 200
     vista = next(t for t in respuesta.json()["tareas"] if t["id"] == tarea.id)
     assert vista["enlace_vista"]["roto"] is True
-    assert vista["enlace_vista"]["leccion_titulo"] is None
+    assert vista["enlace_vista"]["leccion_titulo"] == "Importar componentes"
     assert vista["enlace_vista"]["pieza_titulo"] is None
 
 

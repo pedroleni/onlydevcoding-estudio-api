@@ -54,9 +54,10 @@ def test_alta_curso_rechaza_ids_que_ya_existen_en_disco(cliente_con_token):
     assert respuesta.status_code == 409
 
 
-def test_alta_curso_rechaza_una_carpeta_de_curso_vacia_preexistente(
+def test_alta_curso_acepta_una_carpeta_de_curso_vacia_preexistente(
     cliente_con_token, cfg
 ):
+    # Mismo criterio que el listado: una carpeta sin lecciones aún no es un curso.
     (cfg.cursos_dir / "PYTHON").mkdir()
 
     respuesta = cliente_con_token.post(
@@ -65,7 +66,8 @@ def test_alta_curso_rechaza_una_carpeta_de_curso_vacia_preexistente(
         json={"id": "python", "nombre": "Python"},
     )
 
-    assert respuesta.status_code == 409
+    assert respuesta.status_code == 201
+    assert respuesta.json()["en_disco"] is True
 
 
 def test_alta_curso_rechaza_ids_que_ya_existen_en_la_app(cliente_con_token):
@@ -111,15 +113,13 @@ def test_alta_curso_sin_token_devuelve_401(cliente_con_token):
     assert respuesta.status_code == 401
 
 
-def test_carpeta_de_curso_vacia_sin_alta_devuelve_lista_de_lecciones_vacia(
-    cliente_con_token, cfg
-):
+def test_carpeta_de_curso_vacia_sin_alta_no_es_un_curso(cliente_con_token, cfg):
+    # Mismo criterio que el listado: sin lecciones ni alta en la app, no existe.
     (cfg.cursos_dir / "VACIO").mkdir()
 
     respuesta = cliente_con_token.get("/api/cursos/vacio/lecciones")
 
-    assert respuesta.status_code == 200
-    assert respuesta.json() == []
+    assert respuesta.status_code == 404
     assert "vacio" not in {
         curso["id"] for curso in cliente_con_token.get("/api/cursos").json()
     }

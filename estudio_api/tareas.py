@@ -105,6 +105,12 @@ class TareaNueva(_ModeloEstricto):
         return valor
 
 
+def _una_linea(valor: str) -> bool:
+    return len(valor.splitlines()) == 1 and not any(
+        ord(caracter) < 0x20 or ord(caracter) == 0x7F for caracter in valor
+    )
+
+
 class Tarea(TareaNueva):
     id: int
     hecha: bool
@@ -122,6 +128,8 @@ class DatosTipoTarea(_ModeloEstricto):
         recortado = valor.strip()
         if not 1 <= len(recortado) <= 40:
             raise ValueError("El nombre debe tener entre 1 y 40 caracteres")
+        if not _una_linea(recortado):
+            raise ValueError("El nombre no puede contener saltos de línea")
         return recortado
 
 
@@ -153,6 +161,8 @@ class CursoApp(_ModeloEstricto):
         recortado = valor.strip()
         if not 1 <= len(recortado) <= 60:
             raise ValueError("El nombre debe tener entre 1 y 60 caracteres")
+        if not _una_linea(recortado):
+            raise ValueError("El nombre no puede contener saltos de línea")
         return recortado
 
 
@@ -171,7 +181,7 @@ _SELECT_TAREAS_ATRASADAS = """
     SELECT id, fecha, hora, texto, tipo, curso, numero, pieza, red, hecha, hecha_en
     FROM tarea
     WHERE fecha < ? AND hecha = 0
-    ORDER BY fecha, hora IS NULL, hora, id
+    ORDER BY fecha DESC, hora IS NULL DESC, hora DESC, id DESC
     LIMIT ?
 """
 
@@ -213,7 +223,7 @@ def _valores_enlace(
 
 def crear_tarea(bd: sqlite3.Connection, nueva: TareaNueva) -> Tarea:
     curso, numero, pieza, red = _valores_enlace(nueva.enlace)
-    with bd:
+    with nullcontext() if bd.in_transaction else bd:
         cursor = bd.execute(
             """
             INSERT INTO tarea
@@ -239,7 +249,7 @@ def crear_tarea(bd: sqlite3.Connection, nueva: TareaNueva) -> Tarea:
 
 def editar_tarea(bd: sqlite3.Connection, id: int, nueva: TareaNueva) -> Tarea | None:
     curso, numero, pieza, red = _valores_enlace(nueva.enlace)
-    with bd:
+    with nullcontext() if bd.in_transaction else bd:
         cursor = bd.execute(
             """
             UPDATE tarea
@@ -294,7 +304,8 @@ def tareas_atrasadas(
         _SELECT_TAREAS_ATRASADAS,
         (antes_de.isoformat(), limite_efectivo),
     )
-    return [_tarea_desde_fila(fila) for fila in filas]
+    # Se piden las más recientes para que el tope de 200 no oculte la de ayer.
+    return [_tarea_desde_fila(fila) for fila in filas][::-1]
 
 
 def completar_tareas_de_red(

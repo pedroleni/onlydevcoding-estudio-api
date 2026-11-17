@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from datetime import date
 from typing import Annotated, cast
@@ -10,8 +11,8 @@ from starlette.responses import Response
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
 from estudio_api.lectura import (
-    carpeta_leccion,
-    curso_en_disco,
+    curso_existe,
+    ids_cursos_en_disco,
     leer_leccion,
     leer_lecciones,
 )
@@ -40,7 +41,7 @@ from estudio_api.vista_tareas import (
 )
 
 router = APIRouter(prefix="/api")
-TareaId = Annotated[int, Path(ge=1)]
+TareaId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 TipoId = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,30}$")]
 
 
@@ -70,7 +71,8 @@ def _validar_enlace(
     if enlace is None:
         return
 
-    en_disco = curso_en_disco(config, enlace.curso)
+    # Mismo criterio que el listado de cursos y que la vista de tareas.
+    en_disco = enlace.curso in ids_cursos_en_disco(config)
     en_app = any(curso.id == enlace.curso for curso in cursos_app(bd))
     if not en_disco and not en_app:
         raise HTTPException(status_code=422, detail="El curso no existe")
@@ -96,7 +98,9 @@ def _validar_enlace(
             status_code=422,
             detail="No se ha podido leer la lección",
         ) from error
-    if resumen is None or carpeta_leccion(config, enlace.curso, enlace.numero) is None:
+    # Basta con que la lección esté en el listado, aunque solo tenga guion:
+    # son justo las que aún se preparan o se graban.
+    if resumen is None:
         raise HTTPException(status_code=422, detail="La lección no existe")
     if enlace.pieza is None:
         return
@@ -122,6 +126,30 @@ def _validar_tarea_nueva(
     if not _tipo_existe(bd, nueva.tipo):
         raise HTTPException(status_code=422, detail="El tipo de tarea no existe")
     _validar_enlace(config, bd, nueva.enlace)
+
+
+def _guardar(
+    config: Config,
+    bd: sqlite3.Connection,
+    nueva: TareaNueva,
+    operar: Callable[[], Tarea | None],
+) -> Tarea | None:
+    # Las lecturas de disco van fuera del cerrojo; dentro se vuelve a comprobar el curso,
+    # que un DELETE /api/cursos puede haber borrado entretanto.
+    _validar_tarea_nueva(config, bd, nueva)
+    try:
+        with bd:
+            bd.execute("BEGIN IMMEDIATE")
+            if nueva.enlace is not None and not curso_existe(
+                config, bd, nueva.enlace.curso
+            ):
+                raise HTTPException(status_code=422, detail="El curso no existe")
+            return operar()
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="El tipo de tarea no existe",
+        ) from error
 
 
 def _vista_unica(
@@ -159,14 +187,8 @@ def listar_tareas(
 def alta_tarea(request: Request, nueva: TareaNueva) -> TareaVista:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
-        _validar_tarea_nueva(config, bd, nueva)
-        try:
-            tarea = crear_tarea(bd, nueva)
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(
-                status_code=422,
-                detail="El tipo de tarea no existe",
-            ) from error
+        tarea = _guardar(config, bd, nueva, lambda: crear_tarea(bd, nueva))
+        assert tarea is not None
         return _vista_unica(config, bd, tarea)
 
 
@@ -178,14 +200,7 @@ def modificar_tarea(
 ) -> TareaVista:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
-        _validar_tarea_nueva(config, bd, nueva)
-        try:
-            tarea = editar_tarea(bd, id, nueva)
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(
-                status_code=422,
-                detail="El tipo de tarea no existe",
-            ) from error
+        tarea = _guardar(config, bd, nueva, lambda: editar_tarea(bd, id, nueva))
         if tarea is None:
             raise HTTPException(status_code=404, detail="La tarea no existe")
         return _vista_unica(config, bd, tarea)

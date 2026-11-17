@@ -9,6 +9,7 @@ from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
 from estudio_api.lectura import (
     curso_en_disco,
+    curso_existe,
     leer_cursos,
     leer_leccion,
     leer_lecciones,
@@ -19,7 +20,6 @@ from estudio_api.tareas import (
     CursoApp,
     borrar_curso_app,
     crear_curso_app,
-    cursos_app,
 )
 
 router = APIRouter(prefix="/api")
@@ -42,20 +42,19 @@ def listar_cursos(request: Request) -> list[Curso]:
 def dar_de_alta_curso(request: Request, curso: CursoApp) -> Curso:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
-        if curso_en_disco(config, curso.id) or curso.id in {
-            existente.id for existente in cursos_app(bd)
-        }:
+        if curso_existe(config, bd, curso.id):
             raise HTTPException(status_code=409, detail="El curso ya existe")
         try:
             crear_curso_app(bd, curso)
         except sqlite3.IntegrityError as error:
             raise HTTPException(status_code=409, detail="El curso ya existe") from error
+    # Si ya había una carpeta vacía con ese id, el listado la mostrará como curso de disco.
     return Curso(
         id=curso.id,
         nombre=curso.nombre,
         carpeta=None,
         lecciones=0,
-        en_disco=False,
+        en_disco=curso_en_disco(config, curso.id),
     )
 
 
@@ -78,8 +77,7 @@ def listar_lecciones(
 ) -> list[LeccionResumen] | Response:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
-        existe_en_app = curso in {existente.id for existente in cursos_app(bd)}
-        if not curso_en_disco(config, curso) and not existe_en_app:
+        if not curso_existe(config, bd, curso):
             return Response(status_code=404)
         lecciones = leer_lecciones(config, curso, bd)
     return lecciones
