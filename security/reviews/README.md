@@ -22,3 +22,4 @@ Guarda aquí cada auditoría completa, no los chequeos puntuales de una tarea.
 | 2026-11-17 | [2026-11-17-tarea-5-publicar.md](2026-11-17-tarea-5-publicar.md) | Cambios de la Tarea 5 de fase 2, ocho dominios | Sin hallazgos, score 0 |
 | 2026-11-17 | [2026-11-17-fase-2.md](2026-11-17-fase-2.md) | Rama `feat/fase-2` completa (`main...feat/fase-2`), ocho dominios | BAJO, score 2: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 2 LOW (arreglados), 5 INFO |
 | 2026-11-17 | [2026-11-17-fase-3.md](2026-11-17-fase-3.md) | Rama `feat/fase-3` completa (`main...feat/fase-3`), ocho dominios | BAJO, score 1: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 1 LOW (arreglado), 6 INFO |
+| 2026-11-17 | [2026-11-17-fase-4.md](2026-11-17-fase-4.md) | Rama `feat/fase-4` completa (`main...feat/fase-4`), ocho dominios | BAJO, score 2: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 2 LOW, 6 INFO |
