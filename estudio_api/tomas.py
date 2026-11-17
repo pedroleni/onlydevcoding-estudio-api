@@ -204,8 +204,10 @@ async def _escribir_temporal(
             if len(cabecera) < 12:
                 cabecera.extend(trozo[: 12 - len(cabecera)])
             await run_in_threadpool(_escribir_trozo, descriptor, trozo)
-        await run_in_threadpool(_sincronizar_y_cerrar, descriptor)
-        descriptor = None
+        try:
+            await run_in_threadpool(_sincronizar_y_cerrar, descriptor)
+        finally:
+            descriptor = None
         if (
             total != longitud
             or len(cabecera) < 12
@@ -311,6 +313,9 @@ async def guardar_toma(
             bytes=total,
         )
     except BaseException:
+        if temporal is not None:
+            await run_in_threadpool(temporal.unlink, True)
+            temporal = None
         await run_in_threadpool(
             _borrar_directorios_vacios,
             directorios.creados,

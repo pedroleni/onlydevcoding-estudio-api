@@ -1,4 +1,7 @@
+import hashlib
+import json
 import shutil
+import threading
 from contextlib import closing
 from typing import Annotated, cast
 
@@ -9,6 +12,9 @@ from starlette.responses import Response
 
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
+from estudio_api.escritura import escribir_atomico
+from estudio_api.guion_textos import CambiosTextos, aplicar_textos
+from estudio_api.lectura import datos_curso
 from estudio_api.rutas_api import CursoId, NumeroLeccion
 from estudio_api.teleprompter import (
     Teleprompter,
@@ -33,6 +39,7 @@ from estudio_api.trabajos import (
 )
 
 router = APIRouter(prefix="/api")
+_BLOQUEO_TEXTOS = threading.Lock()
 TrabajoId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 EscenaId = Annotated[str, Path(pattern=r"^E[0-9]{2}$")]
 
@@ -60,6 +67,49 @@ def obtener_teleprompter(
     if teleprompter is None:
         return Response(status_code=404)
     return teleprompter
+
+
+@router.put(
+    "/cursos/{curso}/lecciones/{numero}/guion/textos",
+    response_model=Teleprompter,
+)
+def guardar_textos_guion(
+    request: Request,
+    cambios: CambiosTextos,
+    curso: CursoId,
+    numero: NumeroLeccion,
+) -> Teleprompter:
+    config = _config(request)
+    conflicto = "El guion ha cambiado fuera de la app. Recarga antes de guardar."
+    with _BLOQUEO_TEXTOS:
+        leido = datos_curso(config, curso)
+        datos_guion = leido[2].get(numero) if leido is not None else None
+        if datos_guion is None:
+            raise HTTPException(status_code=404, detail="La lección no existe")
+        guion = datos_guion[2]
+        ruta = datos_guion[3]
+        contenido_inicial = datos_guion[4]
+        version_inicial = hashlib.sha256(contenido_inicial).hexdigest()
+        if version_inicial != cambios.version:
+            raise HTTPException(status_code=409, detail=conflicto)
+        try:
+            guion_actualizado = aplicar_textos(guion, cambios)
+        except ValueError as error:
+            mensaje = str(error)
+            raise HTTPException(status_code=422, detail=mensaje) from error
+        try:
+            contenido_actual = ruta.read_bytes()
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=conflicto) from error
+        if hashlib.sha256(contenido_actual).hexdigest() != version_inicial:
+            raise HTTPException(status_code=409, detail=conflicto)
+        contenido = json.dumps(guion_actualizado, ensure_ascii=False, indent=2) + "\n"
+        escribir_atomico(ruta, contenido)
+        with closing(abrir_bd(config.bd_ruta)) as bd:
+            teleprompter = leer_teleprompter(config, bd, curso, numero)
+        if teleprompter is None:
+            raise HTTPException(status_code=404, detail="La lección no existe")
+        return teleprompter
 
 
 @router.put(

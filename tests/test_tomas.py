@@ -473,6 +473,72 @@ def test_si_falla_el_replace_final_se_restaura_la_toma_anterior(tomas, monkeypat
     _assert_sin_restos(grabaciones, original)
 
 
+def test_si_falla_instalar_borra_el_temporal_antes_de_los_directorios(
+    tomas, monkeypatch
+):
+    config, _, grabaciones, _ = tomas
+    carpeta = grabaciones.parent
+    shutil.rmtree(carpeta)
+    cuerpo = _wav(relleno=4)
+
+    def instalar_con_fallo(*_args):
+        raise OSError("fallo ficticio al instalar")
+
+    monkeypatch.setattr("estudio_api.tomas._instalar_temporal", instalar_con_fallo)
+
+    async def completo():
+        yield cuerpo
+
+    with pytest.raises(OSError):
+        asyncio.run(
+            guardar_toma(
+                config,
+                "react",
+                4,
+                "E04",
+                completo(),
+                len(cuerpo),
+            )
+        )
+
+    assert not carpeta.exists()
+
+
+def test_un_fsync_fallido_no_cierra_dos_veces_el_descriptor(tomas, monkeypatch):
+    config, _, grabaciones, _ = tomas
+    cuerpo = _wav(relleno=4)
+    cierres = []
+    close_real = os.close
+
+    def fsync_con_fallo(_descriptor):
+        raise OSError("fallo ficticio al sincronizar")
+
+    def close_contado(descriptor):
+        cierres.append(descriptor)
+        close_real(descriptor)
+
+    monkeypatch.setattr("estudio_api.tomas.os.fsync", fsync_con_fallo)
+    monkeypatch.setattr("estudio_api.tomas.os.close", close_contado)
+
+    async def completo():
+        yield cuerpo
+
+    with pytest.raises(OSError):
+        asyncio.run(
+            guardar_toma(
+                config,
+                "react",
+                4,
+                "E04",
+                completo(),
+                len(cuerpo),
+            )
+        )
+
+    assert len(cierres) == 1
+    assert [ruta for ruta in grabaciones.iterdir() if ruta.name.startswith(".")] == []
+
+
 def test_si_falla_el_fsync_tras_replace_se_restaura_la_toma_anterior(
     tomas, monkeypatch
 ):
