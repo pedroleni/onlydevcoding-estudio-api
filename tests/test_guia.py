@@ -101,3 +101,30 @@ def test_generar_guia_no_incluye_rutas_absolutas_ni_recorridos():
 
     assert "/ruta/ficticia" not in guia
     assert "../fuera" not in guia
+
+
+def test_generar_guia_encierra_las_notas_y_no_rompe_secciones_posteriores():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {
+                    "redes": {
+                        "youtube": {
+                            "notas": "Inicio de una valla sin cerrar:\n```\ncontenido",
+                        }
+                    }
+                }
+            },
+            "despues_de_publicar": ["Comprobar el resultado"],
+        }
+    )
+
+    guia = generar_guia(publicacion, "Curso ficticio", 4, {})
+
+    assert (
+        "#### Notas\n\n````\nInicio de una valla sin cerrar:\n```\ncontenido\n````"
+        in guia
+    )
+    assert guia.index("#### Notas") < guia.index("## Después de publicar")
+    assert "- Comprobar el resultado" in guia

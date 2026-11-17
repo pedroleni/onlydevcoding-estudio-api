@@ -46,10 +46,12 @@ ruta de explotación concreta.
 - La única ejecución de procesos permitida en esta fase es la llamada concreta
   a `herramientas/publicar/md-a-html.py` para regenerar una guía HTML. Usa
   `sys.executable` y la ruta fija del script dentro de `ESTUDIO_DIR`, una lista
-  de argumentos, `shell=False`, un timeout de 60 segundos y `cwd` en la carpeta
-  `publicar/` validada dentro de `CURSOS_DIR`. Las rutas de entrada, salida e
-  imagen se validan dentro de esas raíces; el HTML se genera en un temporal de
-  `publicar/` y se instala de forma atómica.
+  de argumentos, `shell=False`, salida estándar y error capturados, un grupo de
+  procesos propio, un timeout de 60 segundos y `cwd` en la carpeta `publicar/`
+  validada dentro de `CURSOS_DIR`. Si vence el timeout se mata el grupo completo
+  con `os.killpg` y se recoge el proceso. Las rutas de entrada, salida e imagen
+  se validan dentro de esas raíces; la imagen se pasa como ruta absoluta y el
+  HTML se genera en un temporal de `publicar/` y se instala de forma atómica.
 
 ## Hallazgos prioritarios
 

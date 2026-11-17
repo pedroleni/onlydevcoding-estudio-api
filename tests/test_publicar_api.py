@@ -1,5 +1,9 @@
 import json
+import os
+import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -305,7 +309,9 @@ def test_guardar_textos_escribe_json_y_regenera_las_dos_guias(cliente_con_token,
         encoding="utf-8"
     ) == "guía anterior"
     assert html.read_text(encoding="utf-8") == (
-        "<html>1-youtube-leccion/miniatura-A-ejemplo.jpg</html>"
+        "<html>"
+        + str((publicar / "1-youtube-leccion" / "miniatura-A-ejemplo.jpg").resolve())
+        + "</html>"
     )
     assert (publicar / "PUBLICAR-leccion-4.html.antes-de-editar").read_text(
         encoding="utf-8"
@@ -385,13 +391,32 @@ def test_regenerar_html_ejecuta_una_lista_sin_shell(
     script = _instalar_script_html(cfg)
     llamada = {}
 
+    class ProcesoFalso:
+        pid = 12345
+        returncode = 0
+
+        def __init__(self, argumentos):
+            self.argumentos = argumentos
+
+        def communicate(self, timeout):
+            llamada["timeout"] = timeout
+            Path(self.argumentos[3]).write_text(
+                "<html>ficticio</html>", encoding="utf-8"
+            )
+            return b"salida", b"error"
+
     def ejecutar(argumentos, **opciones):
         llamada["argumentos"] = argumentos
         llamada["opciones"] = opciones
-        Path(argumentos[3]).write_text("<html>ficticio</html>", encoding="utf-8")
-        return subprocess.CompletedProcess(argumentos, 0)
+        return ProcesoFalso(argumentos)
 
-    monkeypatch.setattr("estudio_api.guia.subprocess.run", ejecutar)
+    eleccion = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": PORTADA_LECCION},
+    )
+    assert eleccion.status_code == 200
+    monkeypatch.setattr("estudio_api.guia.subprocess.Popen", ejecutar)
 
     respuesta = cliente_con_token.put(
         f"{RUTA_PUBLICACION}/piezas/leccion/redes/linkedin/textos",
@@ -402,6 +427,256 @@ def test_regenerar_html_ejecuta_una_lista_sin_shell(
     assert respuesta.status_code == 200
     assert isinstance(llamada["argumentos"], list)
     assert llamada["argumentos"][1] == str(script.resolve())
+    assert llamada["argumentos"][4] == str(
+        (
+            _carpeta_leccion(cfg)
+            / "publicar"
+            / "1-youtube-leccion"
+            / "miniatura-A-ejemplo.jpg"
+        ).resolve()
+    )
     assert llamada["opciones"]["shell"] is False
-    assert llamada["opciones"]["timeout"] == 60
+    assert llamada["opciones"]["stdout"] is subprocess.PIPE
+    assert llamada["opciones"]["stderr"] is subprocess.PIPE
+    assert llamada["opciones"]["start_new_session"] is True
     assert llamada["opciones"]["cwd"] == _carpeta_leccion(cfg) / "publicar"
+    assert llamada["timeout"] == 60
+
+
+def test_put_conserva_medios_anotados_aunque_aun_no_existan(cliente_con_token, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    datos = {
+        "version": 1,
+        "piezas": {
+            "leccion": {
+                "video": "pendiente/video-leccion.mp4",
+                "portadas": ["pendiente/portada-leccion.jpg"],
+                "redes": {
+                    "linkedin": {
+                        "texto": "Texto ficticio",
+                        "video": "pendiente/video-linkedin.mp4",
+                    }
+                },
+            }
+        },
+    }
+    (publicar / "publicacion.json").write_text(json.dumps(datos), encoding="utf-8")
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto actualizado"},
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads((publicar / "publicacion.json").read_text(encoding="utf-8"))
+    pieza = guardado["piezas"]["leccion"]
+    assert pieza["video"] == "pendiente/video-leccion.mp4"
+    assert pieza["portadas"] == ["pendiente/portada-leccion.jpg"]
+    assert pieza["redes"]["linkedin"]["video"] == "pendiente/video-linkedin.mp4"
+
+
+def test_put_rechaza_publicar_symlink_fuera_sin_escribir(
+    cliente_con_token, cfg, tmp_path
+):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    fuera = tmp_path / "fuera"
+    shutil.rmtree(publicar)
+    fuera.mkdir()
+    publicar.symlink_to(fuera, target_is_directory=True)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == "La carpeta publicar no es válida"
+    assert not (fuera / "publicacion.json").exists()
+
+
+def test_dos_put_simultaneos_conservan_las_dos_redes(
+    cliente_con_token, cfg, monkeypatch
+):
+    from estudio_api import rutas_publicar
+
+    lectura_real = rutas_publicar.leer_publicacion
+
+    def leer_con_retardo(*argumentos, **opciones):
+        lectura = lectura_real(*argumentos, **opciones)
+        time.sleep(0.15)
+        return lectura
+
+    monkeypatch.setattr(rutas_publicar, "leer_publicacion", leer_con_retardo)
+    monkeypatch.setattr(rutas_publicar, "regenerar_guia", lambda *args, **kwargs: None)
+
+    def guardar(red):
+        return cliente_con_token.put(
+            f"{RUTA_PUBLICACION}/piezas/leccion/redes/{red}/textos",
+            headers={"X-Estudio-Token": TOKEN},
+            json={"texto": f"Texto de {red}"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as ejecutor:
+        respuestas = list(ejecutor.map(guardar, ["youtube", "instagram"]))
+
+    assert [respuesta.status_code for respuesta in respuestas] == [200, 200]
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    redes = json.loads(ruta.read_text(encoding="utf-8"))["piezas"]["leccion"]["redes"]
+    assert set(redes) == {"youtube", "instagram"}
+
+
+def test_put_con_sustituto_unicode_suelto_da_422(cliente_con_token):
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={
+            "X-Estudio-Token": TOKEN,
+            "Content-Type": "application/json",
+        },
+        content=b'{"texto":"a\\ud800b"}',
+    )
+
+    assert respuesta.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "cuerpo",
+    [
+        {"titulos": ["Título\n## Falso"]},
+        {"ajustes": ["Visibilidad: privado\n## Falso"]},
+    ],
+)
+def test_put_rechaza_saltos_en_titulos_y_ajustes(cliente_con_token, cuerpo):
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json=cuerpo,
+    )
+
+    assert respuesta.status_code == 422
+
+
+def test_put_sin_carpeta_publicar_da_409(cliente_con_token, cfg):
+    shutil.rmtree(_carpeta_leccion(cfg) / "publicar")
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == "La lección no tiene carpeta publicar"
+
+
+def test_fallo_al_escribir_markdown_devuelve_vista_con_aviso(
+    cliente_con_token, cfg, monkeypatch
+):
+    def fallar_markdown(*_argumentos, **_opciones):
+        raise OSError("fallo ficticio")
+
+    monkeypatch.setattr("estudio_api.guia.escribir_atomico", fallar_markdown)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto guardado"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["aviso"]
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    assert (
+        json.loads(ruta.read_text(encoding="utf-8"))["piezas"]["leccion"]["redes"][
+            "instagram"
+        ]["texto"]
+        == "Texto guardado"
+    )
+
+
+def test_timeout_mata_el_grupo_del_conversor(cliente_con_token, cfg, monkeypatch):
+    from estudio_api import guia
+
+    assert hasattr(guia, "TIMEOUT_CONVERSOR_S")
+    monkeypatch.setattr(guia, "TIMEOUT_CONVERSOR_S", 0.05)
+    _instalar_script_html(
+        cfg,
+        (
+            "import os\n"
+            "from pathlib import Path\n"
+            "import time\n"
+            "Path('.grupo-prueba').write_text(str(os.getpgrp()), encoding='utf-8')\n"
+            "time.sleep(30)\n"
+        ),
+    )
+    publicar = _carpeta_leccion(cfg) / "publicar"
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["aviso"] == "No se ha podido regenerar la guía HTML"
+    grupo = int((publicar / ".grupo-prueba").read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.killpg(grupo, 0)
+
+
+def test_json_guardado_omite_listas_vacias_y_none_sin_perder_version(
+    cliente_con_token, cfg
+):
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio", "titulos": [], "ajustes": []},
+    )
+
+    assert respuesta.status_code == 200
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    datos = json.loads(ruta.read_text(encoding="utf-8"))
+    assert datos["version"] == 1
+    assert "titulos" not in datos["piezas"]["leccion"]["redes"]["instagram"]
+    assert "ajustes" not in datos["piezas"]["leccion"]["redes"]["instagram"]
+    assert "null" not in ruta.read_text(encoding="utf-8")
+
+
+def test_guia_usa_el_mismo_titulo_que_la_vista_si_falta_en_json(cliente_con_token, cfg):
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 200
+    titulo_vista = _pieza(respuesta.json(), "leccion")["titulo"]
+    guia = (_carpeta_leccion(cfg) / "publicar" / "PUBLICAR-leccion-4.md").read_text(
+        encoding="utf-8"
+    )
+    assert f"## {titulo_vista}" in guia
+    assert "## Leccion\n" not in guia
+
+
+def test_put_construye_la_vista_una_sola_vez(cliente_con_token, monkeypatch):
+    from estudio_api import rutas_publicar
+
+    construir_real = rutas_publicar.construir_vista_publicacion
+    llamadas = 0
+
+    def contar(*argumentos, **opciones):
+        nonlocal llamadas
+        llamadas += 1
+        return construir_real(*argumentos, **opciones)
+
+    monkeypatch.setattr(rutas_publicar, "construir_vista_publicacion", contar)
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/instagram/textos",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"texto": "Texto ficticio"},
+    )
+
+    assert respuesta.status_code == 200
+    assert llamadas == 1

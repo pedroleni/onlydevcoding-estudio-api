@@ -1,5 +1,6 @@
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,8 @@ NOMBRES_RED: dict[Red, str] = {
     "tiktok": "TikTok",
     "linkedin": "LinkedIn",
 }
+TIMEOUT_CONVERSOR_S = 60
+AVISO_HTML = "No se ha podido regenerar la guía HTML"
 
 
 def _bloque_codigo(contenido: str) -> str:
@@ -62,8 +65,7 @@ def _red_markdown(red: Red, textos: TextosRed) -> list[str]:
         partes.append("")
     if textos.video is not None and _es_nombre_relativo(textos.video):
         partes.extend(("#### Archivo de vídeo", "", f"`{textos.video}`", ""))
-    if textos.notas is not None:
-        partes.extend(("#### Notas", "", textos.notas, ""))
+    _campo_bloque(partes, "Notas", textos.notas)
     return partes
 
 
@@ -72,12 +74,17 @@ def generar_guia(
     curso_nombre: str,
     numero: int,
     portada_elegida: dict[str, str],
+    titulos_piezas: dict[str, str] | None = None,
 ) -> str:
+    titulos_piezas = titulos_piezas or {}
     partes = [f"# Publicar la lección {numero} de {curso_nombre}", ""]
     for identificador, pieza in publicacion.piezas.items():
-        partes.extend(
-            (f"## {pieza.titulo or identificador.replace('-', ' ').capitalize()}", "")
+        titulo = (
+            pieza.titulo
+            or titulos_piezas.get(identificador)
+            or identificador.replace("-", " ").capitalize()
         )
+        partes.extend((f"## {titulo}", ""))
         if pieza.video is not None and _es_nombre_relativo(pieza.video):
             partes.extend((f"- Archivo: `{pieza.video}`",))
         if (portada := portada_elegida.get(identificador)) and _es_nombre_relativo(
@@ -94,7 +101,7 @@ def generar_guia(
                 partes.extend(_red_markdown(red, textos))
 
     if publicacion.notas is not None:
-        partes.extend(("## Notas", "", publicacion.notas, ""))
+        partes.extend(("## Notas", "", _bloque_codigo(publicacion.notas), ""))
     partes.extend(("## Después de publicar", ""))
     if publicacion.despues_de_publicar:
         partes.extend(f"- {tarea}" for tarea in publicacion.despues_de_publicar)
@@ -131,17 +138,27 @@ def regenerar_guia(
     curso_nombre: str,
     publicacion: Publicacion,
     portadas: dict[str, str],
+    titulos_piezas: dict[str, str] | None = None,
 ) -> str | None:
     rutas = _rutas_regeneracion(config, carpeta, numero)
     if rutas is None:
         return "No se ha podido regenerar la guía"
     publicar, markdown, html, script = rutas
-    escribir_atomico(
-        markdown,
-        generar_guia(publicacion, curso_nombre, numero, portadas),
-    )
+    try:
+        escribir_atomico(
+            markdown,
+            generar_guia(
+                publicacion,
+                curso_nombre,
+                numero,
+                portadas,
+                titulos_piezas,
+            ),
+        )
+    except OSError:
+        return "No se ha podido regenerar la guía Markdown"
     if not script.is_file():
-        return "No se ha encontrado md-a-html.py; se ha actualizado solo el Markdown"
+        return AVISO_HTML
 
     descriptor, nombre_temporal = tempfile.mkstemp(
         dir=publicar,
@@ -157,18 +174,38 @@ def regenerar_guia(
         str(temporal),
     ]
     if portada := portadas.get("leccion"):
-        argumentos.append(portada)
+        try:
+            portada_absoluta = ruta_segura(
+                publicar,
+                *PurePosixPath(portada).parts,
+            )
+        except ValueError:
+            portada_absoluta = None
+        if portada_absoluta is not None and portada_absoluta.is_file():
+            argumentos.append(str(portada_absoluta))
     try:
-        subprocess.run(
+        proceso = subprocess.Popen(
             argumentos,
-            check=True,
             shell=False,
-            timeout=60,
             cwd=publicar,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        try:
+            proceso.communicate(timeout=TIMEOUT_CONVERSOR_S)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proceso.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proceso.communicate()
+            return AVISO_HTML
+        if proceso.returncode != 0:
+            return AVISO_HTML
         reemplazar_atomico(html, temporal)
-    except OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired:
-        return "No se ha podido regenerar la guía HTML; el Markdown sí está actualizado"
+    except OSError:
+        return AVISO_HTML
     finally:
         temporal.unlink(missing_ok=True)
     return None

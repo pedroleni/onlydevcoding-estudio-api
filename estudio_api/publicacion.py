@@ -61,6 +61,7 @@ class Publicacion(BaseModel):
                 validar_textos(red, textos)
 
         _validar_lineas("despues_de_publicar", self.despues_de_publicar)
+        _validar_maximo("notas", self.notas, 2000)
         return self
 
 
@@ -84,7 +85,15 @@ def _validar_lineas(campo: str, lineas: list[str]) -> None:
         )
 
 
+def _validar_sin_saltos(campo: str, lineas: list[str]) -> None:
+    if any("\n" in linea or "\r" in linea for linea in lineas):
+        raise ValueError(f"El campo {campo} no admite saltos de línea")
+
+
 def validar_textos(red: Red, textos: TextosRed) -> None:
+    if not _texto_codificable_en_utf8(textos.model_dump(mode="json")):
+        raise ValueError("Los textos deben poder codificarse en UTF-8")
+
     if red == "youtube":
         for titulo in textos.titulos:
             _validar_maximo("titulos", titulo, 100)
@@ -98,6 +107,9 @@ def validar_textos(red: Red, textos: TextosRed) -> None:
         raise ValueError(f"La red no está permitida: {red}")
 
     _validar_maximo("comentario_fijado", textos.comentario_fijado, 10000)
+    _validar_maximo("notas", textos.notas, 2000)
+    _validar_sin_saltos("titulos", textos.titulos)
+    _validar_sin_saltos("ajustes", textos.ajustes)
     _validar_lineas("ajustes", textos.ajustes)
 
 
@@ -223,13 +235,18 @@ def _filtrar_medios(publicar: Path, publicacion: Publicacion) -> None:
                 textos.video = None
 
 
-def leer_publicacion(config: Config, carpeta: Path | None) -> LecturaPublicacion:
+def leer_publicacion(
+    config: Config,
+    carpeta: Path | None,
+    *,
+    filtrar: bool = True,
+) -> LecturaPublicacion:
     if carpeta is None:
         return LecturaPublicacion()
 
     publicar = _raiz_publicar(config, carpeta)
     if publicar is None:
-        return LecturaPublicacion()
+        return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
     try:
         ruta = ruta_segura(publicar, "publicacion.json")
     except ValueError:
@@ -247,5 +264,6 @@ def leer_publicacion(config: Config, carpeta: Path | None) -> LecturaPublicacion
     if not _texto_codificable_en_utf8(publicacion.model_dump(mode="json")):
         return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
 
-    _filtrar_medios(publicar, publicacion)
+    if filtrar:
+        _filtrar_medios(publicar, publicacion)
     return LecturaPublicacion(publicacion=publicacion, error=None)

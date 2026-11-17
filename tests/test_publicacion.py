@@ -1,4 +1,5 @@
 import json
+import shutil
 
 import pytest
 
@@ -284,3 +285,36 @@ def test_limite_despues_de_publicar_invalida_el_archivo(carpeta_publicacion, cfg
 
     assert lectura.publicacion is None
     assert lectura.error == "No se ha podido leer publicacion.json"
+
+
+def test_publicar_symlink_fuera_devuelve_error(carpeta_publicacion, cfg, tmp_path):
+    publicar = carpeta_publicacion / "publicar"
+    fuera = tmp_path / "publicar-fuera"
+    shutil.rmtree(publicar)
+    fuera.mkdir()
+    publicar.symlink_to(fuera, target_is_directory=True)
+
+    lectura = leer_publicacion(cfg, carpeta_publicacion)
+
+    assert lectura.publicacion is None
+    assert lectura.error == "No se ha podido leer publicacion.json"
+
+
+@pytest.mark.parametrize(
+    "textos",
+    [
+        TextosRed(titulos=["Título\n## Falso"]),
+        TextosRed(ajustes=["Visibilidad: privado\n## Falso"]),
+    ],
+)
+def test_validar_textos_rechaza_saltos_en_titulos_y_ajustes(textos):
+    with pytest.raises(ValueError, match="saltos de línea"):
+        validar_textos("youtube", textos)
+
+
+def test_validar_textos_limita_las_notas_a_2000_caracteres():
+    with pytest.raises(ValueError) as error:
+        validar_textos("youtube", TextosRed(notas="x" * 2001))
+
+    assert "notas" in str(error.value)
+    assert "2000" in str(error.value)

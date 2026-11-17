@@ -1,4 +1,5 @@
 import json
+import threading
 from contextlib import closing
 from typing import Annotated, cast
 
@@ -11,11 +12,10 @@ from estudio_api.decisiones import (
     abrir_bd,
     elegir_portada,
     fijar_estado,
-    portadas_elegidas,
 )
 from estudio_api.escritura import escribir_atomico
 from estudio_api.guia import regenerar_guia
-from estudio_api.lectura import carpeta_leccion, leer_cursos
+from estudio_api.lectura import carpeta_leccion, leer_cursos, leer_leccion
 from estudio_api.modelos import EstadoRed
 from estudio_api.publicacion import (
     PATRON_ID_PIEZA,
@@ -23,15 +23,18 @@ from estudio_api.publicacion import (
     Publicacion,
     Red,
     TextosRed,
+    _raiz_publicar,
     leer_publicacion,
     ruta_publica_publicar,
     ruta_relativa_publicar,
     validar_textos,
 )
+from estudio_api.rutas import ruta_segura
 from estudio_api.rutas_api import CursoId, NumeroLeccion
 from estudio_api.vista_publicacion import VistaPublicacion, construir_vista_publicacion
 
 router = APIRouter(prefix="/api")
+_BLOQUEO_CAMBIO_TEXTOS = threading.Lock()
 PiezaId = Annotated[str, Path(pattern=PATRON_ID_PIEZA.pattern)]
 RedId = Annotated[Red, Path()]
 
@@ -140,6 +143,24 @@ def cambiar_textos(
     carpeta = carpeta_leccion(config, curso, numero)
     if carpeta is None:
         return Response(status_code=404)
+    publicar = _raiz_publicar(config, carpeta)
+    if publicar is None:
+        raise HTTPException(
+            status_code=409,
+            detail="La carpeta publicar no es válida",
+        )
+    if not publicar.is_dir():
+        raise HTTPException(
+            status_code=409,
+            detail="La lección no tiene carpeta publicar",
+        )
+    try:
+        ruta_json = ruta_segura(publicar, "publicacion.json")
+    except ValueError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="La carpeta publicar no es válida",
+        ) from error
     if (
         textos.video is not None
         and ruta_publica_publicar(config, carpeta, textos.video) is None
@@ -149,40 +170,46 @@ def cambiar_textos(
             detail="El vídeo debe ser un archivo válido dentro de publicar",
         )
 
-    lectura = leer_publicacion(config, carpeta)
-    if lectura.error is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="Arregla publicacion.json antes de editar desde la app",
-        )
-
-    with closing(abrir_bd(config.bd_ruta)) as bd:
-        vista_inicial = construir_vista_publicacion(config, curso, numero, bd)
-        if vista_inicial is None:
-            return Response(status_code=404)
-        if all(elemento.id != pieza for elemento in vista_inicial.piezas):
-            return Response(status_code=404)
+    with _BLOQUEO_CAMBIO_TEXTOS:
+        lectura = leer_publicacion(config, carpeta, filtrar=False)
+        if lectura.error is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Arregla publicacion.json antes de editar desde la app",
+            )
 
         publicacion = lectura.publicacion or Publicacion(version=1, piezas={})
+        leccion = leer_leccion(config, curso, numero)
+        if leccion is None:
+            return Response(status_code=404)
+        piezas_existentes = {elemento.id for elemento in leccion.piezas}
+        piezas_existentes.update(publicacion.piezas)
+        if pieza not in piezas_existentes:
+            return Response(status_code=404)
+
         publicacion = publicacion.model_copy(deep=True)
         pieza_publicacion = publicacion.piezas.setdefault(pieza, PiezaPublicacion())
         pieza_publicacion.redes[red] = textos
         contenido = (
             json.dumps(
-                publicacion.model_dump(mode="json", exclude_none=True),
+                publicacion.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    exclude_defaults=True,
+                ),
                 ensure_ascii=False,
                 indent=2,
             )
             + "\n"
         )
-        escribir_atomico(carpeta / "publicar" / "publicacion.json", contenido)
+        escribir_atomico(ruta_json, contenido)
 
-        vista_actualizada = construir_vista_publicacion(config, curso, numero, bd)
-        assert vista_actualizada is not None
-        elegidas = portadas_elegidas(bd, curso, numero)
+        with closing(abrir_bd(config.bd_ruta)) as bd:
+            resultado = construir_vista_publicacion(config, curso, numero, bd)
+        assert resultado is not None
         portadas_validas = {
             elemento.id: relativa
-            for elemento in vista_actualizada.piezas
+            for elemento in resultado.piezas
             if elemento.portada_elegida is not None
             and (
                 relativa := ruta_relativa_publicar(
@@ -192,23 +219,23 @@ def cambiar_textos(
                 )
             )
             is not None
-            and elegidas.get(elemento.id) == elemento.portada_elegida
         }
-
-    curso_nombre = next(
-        (elemento.nombre for elemento in leer_cursos(config) if elemento.id == curso),
-        curso,
-    )
-    aviso = regenerar_guia(
-        config,
-        carpeta,
-        numero,
-        curso_nombre,
-        publicacion,
-        portadas_validas,
-    )
-    with closing(abrir_bd(config.bd_ruta)) as bd:
-        resultado = construir_vista_publicacion(config, curso, numero, bd)
-    assert resultado is not None
-    resultado.aviso = aviso
-    return resultado
+        titulos_piezas = {elemento.id: elemento.titulo for elemento in resultado.piezas}
+        curso_nombre = next(
+            (
+                elemento.nombre
+                for elemento in leer_cursos(config)
+                if elemento.id == curso
+            ),
+            curso,
+        )
+        resultado.aviso = regenerar_guia(
+            config,
+            carpeta,
+            numero,
+            curso_nombre,
+            publicacion,
+            portadas_validas,
+            titulos_piezas,
+        )
+        return resultado
