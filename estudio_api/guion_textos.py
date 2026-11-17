@@ -1,0 +1,122 @@
+import copy
+import unicodedata
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CambioEscena(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^E[0-9]{2}$")
+    cues: list[str] | None = None
+    puntos: list[str] | None = None
+
+
+class CambiosTextos(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    escenas: list[CambioEscena] = Field(min_length=1, max_length=200)
+
+
+# Controles bidireccionales de incrustación (U+202A–U+202E) y de aislamiento
+# (U+2066–U+2069). El resto de ``Cf`` pasa: el ZWJ U+200D forma emojis.
+_BIDI_PROHIBIDOS = frozenset(
+    chr(codigo) for codigo in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+
+
+def _caracter_prohibido(caracter: str) -> bool:
+    return caracter in _BIDI_PROHIBIDOS or unicodedata.category(caracter) in {
+        "Cc",
+        "Cs",
+    }
+
+
+def _validar_texto(texto: str) -> str:
+    texto = texto.strip()
+    if not texto:
+        raise ValueError("El texto no puede estar vacío")
+    if len(texto.splitlines()) != 1 or any(
+        _caracter_prohibido(caracter) for caracter in texto
+    ):
+        raise ValueError(
+            "El texto no puede contener saltos de línea ni caracteres de control"
+        )
+    if len(texto) > 1000:
+        raise ValueError("El texto no puede superar los 1000 caracteres")
+    return texto
+
+
+def _escena_por_id(guion: dict[str, Any], identificador: str) -> dict[str, Any]:
+    escenas = guion.get("escenas")
+    if not isinstance(escenas, list):
+        raise ValueError(  # noqa: TRY004 - contrato público de aplicar_textos
+            f"La escena {identificador} no existe"
+        )
+    escena = next(
+        (
+            candidata
+            for candidata in escenas
+            if isinstance(candidata, dict) and candidata.get("id") == identificador
+        ),
+        None,
+    )
+    if escena is None:
+        raise ValueError(f"La escena {identificador} no existe")
+    if escena.get("modo") not in {"voz", "camara"}:
+        raise ValueError(f"La escena {identificador} no se puede editar")
+    return escena
+
+
+def _aplicar_cues(
+    escena: dict[str, Any],
+    identificador: str,
+    textos: list[str],
+) -> None:
+    cues = escena.get("cues")
+    if not isinstance(cues, list) or any(not isinstance(cue, dict) for cue in cues):
+        raise ValueError(f"La escena {identificador} no tiene frases editables")
+    if len(cues) != len(textos):
+        raise ValueError(
+            f"La escena {identificador} tiene {len(cues)} frases "
+            f"y se han enviado {len(textos)}"
+        )
+    textos_validados = [_validar_texto(texto) for texto in textos]
+    for cue, texto in zip(cues, textos_validados, strict=True):
+        cue["texto"] = texto
+
+
+def _aplicar_puntos(
+    escena: dict[str, Any],
+    identificador: str,
+    textos: list[str],
+) -> None:
+    if "puntos" not in escena and not textos:
+        # La web envía ``puntos: []`` para una escena sin puntos: sin cambios.
+        return
+    puntos = escena.get("puntos")
+    if not isinstance(puntos, list) or any(
+        not isinstance(punto, str) for punto in puntos
+    ):
+        raise ValueError(f"La escena {identificador} no tiene puntos editables")
+    if len(puntos) != len(textos):
+        raise ValueError(
+            f"La escena {identificador} tiene {len(puntos)} puntos "
+            f"y se han enviado {len(textos)}"
+        )
+    escena["puntos"] = [_validar_texto(texto) for texto in textos]
+
+
+def aplicar_textos(guion: dict[str, Any], cambios: CambiosTextos) -> dict[str, Any]:
+    resultado = copy.deepcopy(guion)
+    for cambio in cambios.escenas:
+        escena = _escena_por_id(resultado, cambio.id)
+        if cambio.cues is None and cambio.puntos is None:
+            raise ValueError(f"La escena {cambio.id} no contiene textos para editar")
+        if cambio.cues is not None:
+            _aplicar_cues(escena, cambio.id, cambio.cues)
+        if cambio.puntos is not None:
+            _aplicar_puntos(escena, cambio.id, cambio.puntos)
+    return resultado

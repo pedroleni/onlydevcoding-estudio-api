@@ -114,20 +114,44 @@ def _crear_tablas_tareas(bd: sqlite3.Connection) -> None:
     )
 
 
-def _copia_antes_de_migrar(bd: sqlite3.Connection, ruta: Path) -> None:
-    """Guarda la base v1 en <ruta>.v1 antes de migrar; el código de la fase 2 no abre una v2."""
-    destino = ruta.with_name(f"{ruta.name}.v1")
+def _crear_tabla_trabajo(bd: sqlite3.Connection) -> None:
+    bd.execute(
+        """
+        CREATE TABLE trabajo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            accion TEXT NOT NULL,
+            curso TEXT,
+            numero INTEGER,
+            estado TEXT NOT NULL,
+            progreso REAL NOT NULL DEFAULT 0,
+            inicio TEXT NOT NULL,
+            fin TEXT,
+            error TEXT,
+            registro TEXT NOT NULL DEFAULT '[]',
+            temporal TEXT
+        )
+        """
+    )
+
+
+def _copia_antes_de_migrar(
+    bd: sqlite3.Connection, ruta: Path, version_esperada: int = 1
+) -> None:
+    """Guarda la base en <ruta>.vN si aún conserva la versión esperada."""
+    destino = ruta.with_name(f"{ruta.name}.v{version_esperada}")
     if destino.exists():
         return
-    descriptor, nombre = tempfile.mkstemp(prefix=f".{ruta.name}.v1.", dir=ruta.parent)
+    descriptor, nombre = tempfile.mkstemp(
+        prefix=f".{ruta.name}.v{version_esperada}.", dir=ruta.parent
+    )
     os.close(descriptor)
     temporal = Path(nombre)
     try:
         with closing(sqlite3.connect(temporal)) as copia:
             bd.backup(copia)
             version = copia.execute("PRAGMA user_version").fetchone()[0]
-        # Otra apertura pudo migrar entretanto: una copia ya en v2 no sirve de respaldo.
-        if version == 1:
+        # Otra apertura pudo migrar entretanto: solo sirve la versión observada.
+        if version == version_esperada:
             os.replace(temporal, destino)
     finally:
         temporal.unlink(missing_ok=True)
@@ -139,32 +163,34 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
     try:
         bd.execute("PRAGMA foreign_keys = ON")
         version = bd.execute("PRAGMA user_version").fetchone()[0]
-        if version == 2:
+        if version == 3:
             return bd
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
 
-        if version == 1:
+        if version in (1, 2):
             # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
             # por su propia conexión.
-            _copia_antes_de_migrar(bd, ruta)
+            _copia_antes_de_migrar(bd, ruta, version)
 
         aislamiento_anterior = bd.isolation_level
         bd.isolation_level = None
         try:
             bd.execute("BEGIN IMMEDIATE")
             version = bd.execute("PRAGMA user_version").fetchone()[0]
-            if version == 2:
+            if version == 3:
                 bd.execute("COMMIT")
                 return bd
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(
                     f"Versión de la base de datos no soportada: {version}"
                 )
             if version == 0:
                 _crear_tablas_fase_2(bd)
-            _crear_tablas_tareas(bd)
-            bd.execute("PRAGMA user_version = 2")
+            if version in (0, 1):
+                _crear_tablas_tareas(bd)
+            _crear_tabla_trabajo(bd)
+            bd.execute("PRAGMA user_version = 3")
             bd.execute("COMMIT")
         except Exception:
             if bd.in_transaction:

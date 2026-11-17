@@ -2,7 +2,14 @@ import json
 
 import pytest
 
-from estudio_api.lectura import _leer_json, leer_cursos, leer_leccion, leer_lecciones
+from estudio_api.lectura import (
+    _leer_json,
+    carpeta_de_trabajo,
+    datos_curso,
+    leer_cursos,
+    leer_leccion,
+    leer_lecciones,
+)
 from estudio_api.rutas import ruta_segura
 
 
@@ -76,7 +83,7 @@ def test_error_al_decodificar_json_se_ignora(tmp_path, monkeypatch, error):
     def fallar(_archivo):
         raise error
 
-    monkeypatch.setattr("estudio_api.lectura.json.load", fallar)
+    monkeypatch.setattr("estudio_api.lectura.json.loads", fallar)
 
     assert _leer_json(ruta) is None
 
@@ -153,6 +160,37 @@ def test_escenas_con_textos_y_tiempos(cfg):
         leccion.escenas[1].duracion_s,
     ) == ("E03", 2.0, 3.0)
     assert leccion.escenas[2].textos == []
+
+
+def test_tiempos_usan_el_nombre_real_del_guion_elegido(cfg):
+    guion_dos_digitos = cfg.estudio_dir / "lecciones" / "react-04.json"
+    guion_tres_digitos = cfg.estudio_dir / "lecciones" / "react-004.json"
+    guion_tres_digitos.write_bytes(guion_dos_digitos.read_bytes())
+    montaje_tres_digitos = (
+        cfg.estudio_dir / "public" / "lecciones" / "react-004" / "montaje.json"
+    )
+    montaje_tres_digitos.parent.mkdir(parents=True)
+    montaje_tres_digitos.write_text(
+        json.dumps(
+            {
+                "fps": 10,
+                "duracion": 100,
+                "escenas": [
+                    {"id": "E01", "duracion": 20},
+                    {"id": "E03", "duracion": 50},
+                    {"id": "E04", "duracion": 30},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert leccion.duracion_s == 10.0
+    escena = next(escena for escena in leccion.escenas if escena.id == "E03")
+    assert (escena.inicio_s, escena.duracion_s) == (2.0, 5.0)
 
 
 @pytest.mark.parametrize(
@@ -399,3 +437,25 @@ def test_ruta_segura_rechaza_enlace_fuera(tmp_path):
 
     with pytest.raises(ValueError):
         ruta_segura(raiz, "enlace", "archivo.mp4")
+
+
+def test_carpeta_de_trabajo_prefiere_la_de_disco_y_si_no_la_del_guion(cfg):
+    ruta_guion = cfg.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta_guion.read_text(encoding="utf-8"))
+    guion["carpeta"] = "REACT/04-nombre-del-guion"
+    ruta_guion.write_text(json.dumps(guion), encoding="utf-8")
+    leido = datos_curso(cfg, "react")
+
+    disco = (cfg.cursos_dir / "REACT" / "04-importar-y-exportar").resolve()
+    assert carpeta_de_trabajo(leido, 4) == disco
+
+    disco.rename(disco.with_name("99-apartada"))
+    leido = datos_curso(cfg, "react")
+
+    assert (
+        carpeta_de_trabajo(leido, 4)
+        == (cfg.cursos_dir / "REACT" / "04-nombre-del-guion").resolve()
+    )
+    assert carpeta_de_trabajo(leido, 7) is None
+    assert carpeta_de_trabajo(None, 4) is None
+    assert carpeta_de_trabajo(datos_curso(cfg, "no-existe"), 4) is None

@@ -50,15 +50,23 @@ def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
     return entradas
 
 
-def _leer_json(ruta: Path) -> dict[str, Any] | None:
+def _leer_json_y_bytes(ruta: Path) -> tuple[dict[str, Any], bytes] | None:
     try:
-        with ruta.open(encoding="utf-8") as archivo:
+        with ruta.open("rb") as archivo:
             if os.fstat(archivo.fileno()).st_size > MAX_TAMANO_JSON:
                 return None
-            datos = json.load(archivo)
+            contenido = archivo.read()
+            if len(contenido) > MAX_TAMANO_JSON:
+                return None
+        datos = json.loads(contenido.decode("utf-8"))
     except OSError, UnicodeError, RecursionError, ValueError:
         return None
-    return datos if isinstance(datos, dict) else None
+    return (datos, contenido) if isinstance(datos, dict) else None
+
+
+def _leer_json(ruta: Path) -> dict[str, Any] | None:
+    lectura = _leer_json_y_bytes(ruta)
+    return lectura[0] if lectura is not None else None
 
 
 def _texto(valor: object, defecto: str = "") -> str:
@@ -162,14 +170,14 @@ def _guiones_curso(
     config: Config,
     identificador: str,
     nombre_curso: str,
-) -> dict[int, tuple[str, Path, dict[str, Any]]]:
+) -> dict[int, tuple[str, Path, dict[str, Any], Path, bytes]]:
     try:
         directorio = ruta_segura(config.estudio_dir, "lecciones")
     except ValueError:
         return {}
 
     patron = re.compile(rf"^{re.escape(identificador)}-(\d{{2,3}})\.json$")
-    guiones: dict[int, tuple[str, Path, dict[str, Any]]] = {}
+    guiones: dict[int, tuple[str, Path, dict[str, Any], Path, bytes]] = {}
     for ruta in _entradas_seguras(config.estudio_dir, directorio):
         coincidencia = patron.fullmatch(ruta.name)
         if not ruta.is_file() or coincidencia is None:
@@ -177,14 +185,15 @@ def _guiones_curso(
         numero = int(coincidencia.group(1))
         if not 1 <= numero <= 999:
             continue
-        datos = _leer_json(ruta)
-        if datos is None:
+        lectura = _leer_json_y_bytes(ruta)
+        if lectura is None:
             continue
+        datos, contenido = lectura
         carpeta = _carpeta_desde_guion(config, datos, nombre_curso, numero)
         if carpeta is None:
             continue
         slug, ruta_carpeta = carpeta
-        guiones.setdefault(numero, (slug, ruta_carpeta, datos))
+        guiones.setdefault(numero, (slug, ruta_carpeta, datos, ruta, contenido))
     return guiones
 
 
@@ -195,7 +204,7 @@ def _datos_curso(
     tuple[
         Path,
         dict[int, tuple[str, Path]],
-        dict[int, tuple[str, Path, dict[str, Any]]],
+        dict[int, tuple[str, Path, dict[str, Any], Path, bytes]],
     ]
     | None
 ):
@@ -215,6 +224,32 @@ def _datos_curso(
 # Lectura completa de un curso (carpetas y guiones), reutilizable dentro de una petición.
 datos_curso = _datos_curso
 _SIN_DATOS: Any = object()
+
+
+def carpeta_de_trabajo(
+    leido: (
+        tuple[
+            Path,
+            dict[int, tuple[str, Path]],
+            dict[int, tuple[str, Path, dict[str, Any], Path, bytes]],
+        ]
+        | None
+    ),
+    numero: int,
+) -> Path | None:
+    """Carpeta única de una lección para tomas, teleprompter y ficha.
+
+    Gana la carpeta de disco; si no existe, la que declara el guion (ya
+    validada por ``datos_curso``). Sin curso en ``datos_curso`` no hay carpeta.
+    """
+    if leido is None:
+        return None
+    _, carpetas, guiones = leido
+    if numero in carpetas:
+        return carpetas[numero][1]
+    if numero in guiones:
+        return guiones[numero][1]
+    return None
 
 
 def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
@@ -306,6 +341,7 @@ def leer_lecciones(
         slug = guiones[numero][0] if numero in guiones else carpetas[numero][0]
         carpeta = carpetas[numero][1] if numero in carpetas else None
         guion = guiones[numero][2] if numero in guiones else None
+        identificador_guion = guiones[numero][3].stem if numero in guiones else None
         titulo = _texto(guion.get("titulo")) if guion else ""
         titulo = titulo or _titulo_desde_slug(slug)
         piezas = _piezas(config, carpeta, titulo)
@@ -327,11 +363,12 @@ def leer_lecciones(
                     config,
                     curso,
                     numero,
-                    carpeta,
+                    carpeta_de_trabajo(leido, numero),
                     guion,
                     publicacion=publicacion,
                     estados_publicacion=estados_publicacion,
                     miniatura=miniatura,
+                    identificador_guion=identificador_guion,
                 ),
             )
         )
@@ -340,15 +377,14 @@ def leer_lecciones(
 
 def _tiempos_montaje(
     config: Config,
-    curso: str,
-    numero: int,
+    identificador_guion: str,
 ) -> tuple[dict[str, tuple[float, float]], float | None]:
     try:
         ruta = ruta_segura(
             config.estudio_dir,
             "public",
             "lecciones",
-            f"{curso}-{numero:02d}",
+            identificador_guion,
             "montaje.json",
         )
     except ValueError:
@@ -722,7 +758,10 @@ def leer_leccion(
     guion = guiones[numero][2] if numero in guiones else None
     titulo = _texto(guion.get("titulo")) if guion else ""
     titulo = titulo or _titulo_desde_slug(slug)
-    tiempos, duracion = _tiempos_montaje(config, curso, numero)
+    identificador_guion = (
+        guiones[numero][3].stem if numero in guiones else f"{curso}-{numero:02d}"
+    )
+    tiempos, duracion = _tiempos_montaje(config, identificador_guion)
     piezas = _piezas(config, carpeta, titulo)
     publicacion, estados_publicacion, miniatura = _decisiones_publicacion(
         config,
@@ -741,11 +780,12 @@ def leer_leccion(
             config,
             curso,
             numero,
-            carpeta,
+            carpeta_de_trabajo(leido, numero),
             guion,
             publicacion=publicacion,
             estados_publicacion=estados_publicacion,
             miniatura=miniatura,
+            identificador_guion=guiones[numero][3].stem if numero in guiones else None,
         ),
         subtitulo=_texto(guion.get("subtitulo")) if guion else "",
         escenas=_escenas(guion, tiempos),
