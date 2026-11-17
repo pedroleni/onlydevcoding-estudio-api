@@ -17,6 +17,7 @@ from estudio_api.lectura import (
     _numero_finito_positivo,
     _ruta_publica,
     _texto,
+    carpeta_de_trabajo,
     datos_curso,
 )
 from estudio_api.rutas import ruta_segura
@@ -75,8 +76,10 @@ class Teleprompter(BaseModel):
 
 
 def comando_previa(npx: str, temporal: Path, guion: str) -> list[str]:
+    # ``--no``: npx no descarga nada fuera del lockfile del estudio.
     return [
         npx,
+        "--no",
         "remotion",
         "render",
         "src/index.ts",
@@ -149,9 +152,8 @@ def _cues(valor: object) -> list[CueTeleprompter]:
 
 def _escenas_teleprompter(
     config: Config,
-    curso: str,
-    numero: int,
-    carpeta: Path,
+    identificador_guion: str,
+    carpeta: Path | None,
     guion: dict[str, Any],
 ) -> list[EscenaTeleprompter]:
     valor_escenas = guion.get("escenas")
@@ -187,8 +189,7 @@ def _escenas_teleprompter(
         else:
             grabada = camara_grabada(
                 config,
-                curso,
-                numero,
+                identificador_guion,
                 carpeta,
                 identificador,
             )
@@ -342,7 +343,8 @@ def leer_teleprompter(
     datos_guion = leido[2].get(numero)
     if datos_guion is None:
         return None
-    _, carpeta, guion, ruta_archivo_guion, bytes_guion = datos_guion
+    _, _, guion, ruta_archivo_guion, bytes_guion = datos_guion
+    carpeta = carpeta_de_trabajo(leido, numero)
 
     identificador_guion = ruta_archivo_guion.stem
     montaje_ruta = ruta_montaje(config, identificador_guion)
@@ -354,8 +356,7 @@ def leer_teleprompter(
         version=hashlib.sha256(bytes_guion).hexdigest(),
         escenas=_escenas_teleprompter(
             config,
-            curso,
-            numero,
+            identificador_guion,
             carpeta,
             guion,
         ),

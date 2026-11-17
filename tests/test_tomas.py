@@ -689,3 +689,36 @@ def test_desconexion_del_cliente_limpia_y_responde_400_sin_log_de_error(tomas, c
         registro for registro in caplog.records if registro.levelno >= logging.ERROR
     ]
     _assert_sin_restos(grabaciones, original)
+
+
+def test_toma_subida_con_carpetas_divergentes_la_ven_teleprompter_y_ficha(cfg):
+    disco = cfg.cursos_dir / "REACT" / "04-nombre-en-disco"
+    (cfg.cursos_dir / "REACT" / "04-importar-y-exportar").rename(disco)
+    ruta_guion = cfg.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta_guion.read_text(encoding="utf-8"))
+    guion["carpeta"] = "REACT/04-nombre-del-guion"
+    guion["escenas"] = [
+        {"id": "E03", "modo": "voz", "cues": [{"texto": "Texto ficticio."}]},
+    ]
+    ruta_guion.write_text(json.dumps(guion), encoding="utf-8")
+    config = cfg.model_copy(update={"token_escritura": TOKEN})
+
+    with TestClient(
+        crear_app(config),
+        base_url="http://127.0.0.1:8000",
+    ) as cliente:
+        subida = cliente.put(
+            RUTA_TOMA.format(escena="E03"),
+            headers=CABECERAS_WAV,
+            content=_wav(),
+        )
+        teleprompter = cliente.get("/api/cursos/react/lecciones/4/teleprompter")
+        ficha = cliente.get("/api/cursos/react/lecciones/4")
+
+    assert subida.status_code == 201
+    assert (disco / "grabaciones" / "E03.wav").is_file()
+    assert not (cfg.cursos_dir / "REACT" / "04-nombre-del-guion").exists()
+    escena = teleprompter.json()["escenas"][0]
+    assert escena["grabada"] is True
+    assert escena["toma"] == "cursos/REACT/04-nombre-en-disco/grabaciones/E03.wav"
+    assert ficha.json()["estado"]["voz"] == {"hechas": 1, "total": 1}

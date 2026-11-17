@@ -20,12 +20,26 @@ class CambiosTextos(BaseModel):
     escenas: list[CambioEscena] = Field(min_length=1, max_length=200)
 
 
+# Controles bidireccionales de incrustación (U+202A–U+202E) y de aislamiento
+# (U+2066–U+2069). El resto de ``Cf`` pasa: el ZWJ U+200D forma emojis.
+_BIDI_PROHIBIDOS = frozenset(
+    chr(codigo) for codigo in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+
+
+def _caracter_prohibido(caracter: str) -> bool:
+    return caracter in _BIDI_PROHIBIDOS or unicodedata.category(caracter) in {
+        "Cc",
+        "Cs",
+    }
+
+
 def _validar_texto(texto: str) -> str:
     texto = texto.strip()
     if not texto:
         raise ValueError("El texto no puede estar vacío")
     if len(texto.splitlines()) != 1 or any(
-        unicodedata.category(caracter) == "Cc" for caracter in texto
+        _caracter_prohibido(caracter) for caracter in texto
     ):
         raise ValueError(
             "El texto no puede contener saltos de línea ni caracteres de control"
@@ -79,6 +93,9 @@ def _aplicar_puntos(
     identificador: str,
     textos: list[str],
 ) -> None:
+    if "puntos" not in escena and not textos:
+        # La web envía ``puntos: []`` para una escena sin puntos: sin cambios.
+        return
     puntos = escena.get("puntos")
     if not isinstance(puntos, list) or any(
         not isinstance(punto, str) for punto in puntos

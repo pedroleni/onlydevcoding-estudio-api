@@ -252,3 +252,112 @@ def test_relee_el_archivo_justo_antes_de_escribir(textos_guion, monkeypatch):
         "El guion ha cambiado fuera de la app. Recarga antes de guardar."
     )
     assert ruta.read_text(encoding="utf-8") == externo
+
+
+@pytest.mark.parametrize("texto", ["Texto \ud800 roto", "Texto \u202e invertido"])
+def test_surrogates_sueltos_y_bidi_devuelven_422_sin_tocar_el_archivo(
+    textos_guion, texto
+):
+    cliente, ruta, _, bytes_originales = textos_guion
+    cuerpo = json.dumps(
+        {
+            "version": _version(cliente),
+            "escenas": [{"id": "E03", "cues": ["Primera frase.", texto]}],
+        }
+    )
+
+    respuesta = cliente.put(
+        RUTA_TEXTOS,
+        headers={**CABECERAS, "Content-Type": "application/json"},
+        content=cuerpo.encode("ascii"),
+    )
+
+    assert respuesta.status_code == 422
+    assert respuesta.json()["detail"] == (
+        "El texto no puede contener saltos de línea ni caracteres de control"
+    )
+    assert ruta.read_bytes() == bytes_originales
+    assert not ruta.with_name("react-04.json.antes-de-editar").exists()
+
+
+@pytest.mark.parametrize("caracter", [chr(codigo) for codigo in range(0x202A, 0x202F)])
+def test_rechaza_todos_los_controles_bidi_de_incrustacion(caracter):
+    guion = {"escenas": [{"id": "E03", "modo": "voz", "cues": [{"texto": "a"}]}]}
+    cambios = CambiosTextos(
+        version="0" * 64,
+        escenas=[{"id": "E03", "cues": [f"a{caracter}b"]}],
+    )
+
+    with pytest.raises(ValueError):
+        aplicar_textos(guion, cambios)
+
+
+@pytest.mark.parametrize("caracter", [chr(codigo) for codigo in range(0x2066, 0x206A)])
+def test_rechaza_todos_los_aislamientos_bidi(caracter):
+    guion = {"escenas": [{"id": "E03", "modo": "voz", "cues": [{"texto": "a"}]}]}
+    cambios = CambiosTextos(
+        version="0" * 64,
+        escenas=[{"id": "E03", "cues": [f"a{caracter}b"]}],
+    )
+
+    with pytest.raises(ValueError):
+        aplicar_textos(guion, cambios)
+
+
+def test_emoji_con_zwj_se_guarda(textos_guion):
+    cliente, ruta, _, _ = textos_guion
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        [
+            {
+                "id": "E03",
+                "cues": ["Primera frase.", "Programo \U0001f469\u200d\U0001f4bb hoy."],
+            }
+        ],
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    assert (
+        guardado["escenas"][2]["cues"][1]["texto"]
+        == "Programo \U0001f469\u200d\U0001f4bb hoy."
+    )
+
+
+def test_escena_de_camara_sin_puntos_acepta_lista_vacia_sin_cambios(textos_guion):
+    cliente, ruta, _, _ = textos_guion
+    guion = json.loads(ruta.read_text(encoding="utf-8"))
+    del guion["escenas"][0]["puntos"]
+    ruta.write_text(
+        json.dumps(guion, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        [{"id": "E01", "cues": ["Texto de cámara."], "puntos": []}],
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["escenas"][0]["puntos"] == []
+    assert "puntos" not in json.loads(ruta.read_text(encoding="utf-8"))["escenas"][0]
+
+
+def test_escena_de_camara_sin_puntos_rechaza_puntos_nuevos(textos_guion):
+    cliente, ruta, _, _ = textos_guion
+    guion = json.loads(ruta.read_text(encoding="utf-8"))
+    del guion["escenas"][0]["puntos"]
+    ruta.write_text(
+        json.dumps(guion, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        [{"id": "E01", "puntos": ["Nuevo"]}],
+    )
+
+    assert respuesta.status_code == 422
+    assert respuesta.json()["detail"] == "La escena E01 no tiene puntos editables"

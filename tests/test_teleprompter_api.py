@@ -107,6 +107,7 @@ def test_comando_previa_es_la_lista_cerrada_exacta(tmp_path):
 
     assert comando_previa("/ruta-ficticia/npx", temporal, "react-04") == [
         "/ruta-ficticia/npx",
+        "--no",
         "remotion",
         "render",
         "src/index.ts",
@@ -488,3 +489,28 @@ def test_get_teleprompter_y_trabajo_inexistentes_devuelven_404(teleprompter):
     )
     assert cliente.get("/api/trabajos/999").status_code == 404
     assert cliente.get("/api/trabajos/0").status_code == 422
+
+
+def test_toma_de_camara_del_estudio_usa_el_nombre_real_del_guion(teleprompter):
+    config, cliente, _, _, _, _ = teleprompter
+    lecciones = config.estudio_dir / "lecciones"
+    (lecciones / "react-04.json").replace(lecciones / "react-004.json")
+    grabaciones = config.estudio_dir / "public" / "grabaciones" / "react-004"
+    grabaciones.mkdir(parents=True)
+    (grabaciones / "E01.mov").write_bytes(b"toma ficticia")
+
+    teleprompter_leido = cliente.get(RUTA_TELEPROMPTER).json()
+    ficha = cliente.get("/api/cursos/react/lecciones/4").json()
+
+    assert teleprompter_leido["escenas"][0]["id"] == "E01"
+    assert teleprompter_leido["escenas"][0]["grabada"] is True
+    assert ficha["estado"]["camara"] == {"hechas": 1, "total": 1}
+
+
+def test_get_teleprompter_inexistente_explica_el_404(teleprompter):
+    _, cliente, _, _, _, _ = teleprompter
+
+    respuesta = cliente.get("/api/cursos/react/lecciones/9/teleprompter")
+
+    assert respuesta.status_code == 404
+    assert respuesta.json() == {"detail": "La lección no existe o no tiene guion"}

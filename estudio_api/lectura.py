@@ -226,18 +226,30 @@ datos_curso = _datos_curso
 _SIN_DATOS: Any = object()
 
 
-def ruta_guion(
-    config: Config,
-    curso: str,
+def carpeta_de_trabajo(
+    leido: (
+        tuple[
+            Path,
+            dict[int, tuple[str, Path]],
+            dict[int, tuple[str, Path, dict[str, Any], Path, bytes]],
+        ]
+        | None
+    ),
     numero: int,
-    datos: Any = _SIN_DATOS,
 ) -> Path | None:
-    """Ruta real del guion elegido y validado por ``datos_curso``."""
-    leido = _datos_curso(config, curso) if datos is _SIN_DATOS else datos
+    """Carpeta única de una lección para tomas, teleprompter y ficha.
+
+    Gana la carpeta de disco; si no existe, la que declara el guion (ya
+    validada por ``datos_curso``). Sin curso en ``datos_curso`` no hay carpeta.
+    """
     if leido is None:
         return None
-    guion = leido[2].get(numero)
-    return guion[3] if guion is not None else None
+    _, carpetas, guiones = leido
+    if numero in carpetas:
+        return carpetas[numero][1]
+    if numero in guiones:
+        return guiones[numero][1]
+    return None
 
 
 def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
@@ -329,6 +341,7 @@ def leer_lecciones(
         slug = guiones[numero][0] if numero in guiones else carpetas[numero][0]
         carpeta = carpetas[numero][1] if numero in carpetas else None
         guion = guiones[numero][2] if numero in guiones else None
+        identificador_guion = guiones[numero][3].stem if numero in guiones else None
         titulo = _texto(guion.get("titulo")) if guion else ""
         titulo = titulo or _titulo_desde_slug(slug)
         piezas = _piezas(config, carpeta, titulo)
@@ -350,11 +363,12 @@ def leer_lecciones(
                     config,
                     curso,
                     numero,
-                    carpeta,
+                    carpeta_de_trabajo(leido, numero),
                     guion,
                     publicacion=publicacion,
                     estados_publicacion=estados_publicacion,
                     miniatura=miniatura,
+                    identificador_guion=identificador_guion,
                 ),
             )
         )
@@ -766,11 +780,12 @@ def leer_leccion(
             config,
             curso,
             numero,
-            carpeta,
+            carpeta_de_trabajo(leido, numero),
             guion,
             publicacion=publicacion,
             estados_publicacion=estados_publicacion,
             miniatura=miniatura,
+            identificador_guion=guiones[numero][3].stem if numero in guiones else None,
         ),
         subtitulo=_texto(guion.get("subtitulo")) if guion else "",
         escenas=_escenas(guion, tiempos),

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from estudio_api.publicacion import Publicacion
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
+PATRON_ID_GUION = re.compile(r"^[a-z0-9-]{1,40}-\d{2,3}$")
 PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
 
@@ -95,11 +96,11 @@ def voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> boo
 
 def camara_grabada(
     config: Config,
-    curso: str,
-    numero: int,
+    identificador_guion: str | None,
     carpeta: Path | None,
     escena: str | None,
 ) -> bool:
+    """Toma de cámara de la IA en la lección o del estudio con el nombre real del guion."""
     if escena is None:
         return False
 
@@ -115,9 +116,8 @@ def camara_grabada(
         return True
 
     if (
-        isinstance(numero, bool)
-        or not 1 <= numero <= 999
-        or PATRON_ID_CURSO.fullmatch(curso) is None
+        identificador_guion is None
+        or PATRON_ID_GUION.fullmatch(identificador_guion) is None
     ):
         return False
     try:
@@ -125,7 +125,7 @@ def camara_grabada(
             config.estudio_dir,
             "public",
             "grabaciones",
-            f"{curso}-{numero:02d}",
+            identificador_guion,
             f"{escena}.mov",
         )
     except ValueError:
@@ -188,6 +188,14 @@ def _ultima_previa(config: Config, carpeta: Path | None) -> str | None:
     ).as_posix()
 
 
+def _numero_y_curso_validos(curso: str, numero: int) -> bool:
+    return (
+        not isinstance(numero, bool)
+        and 1 <= numero <= 999
+        and PATRON_ID_CURSO.fullmatch(curso) is not None
+    )
+
+
 def calcular_estado(
     config: Config,
     curso: str,
@@ -198,9 +206,12 @@ def calcular_estado(
     publicacion: Publicacion | None = None,
     estados_publicacion: Mapping[tuple[str, str], EstadoRed] | None = None,
     miniatura: str | None = None,
+    identificador_guion: str | None = None,
 ) -> EstadoLeccion:
     escenas_voz = _escenas(guion, "voz")
     escenas_camara = _escenas(guion, "camara")
+    if identificador_guion is None and _numero_y_curso_validos(curso, numero):
+        identificador_guion = f"{curso}-{numero:02d}"
     return EstadoLeccion(
         guion=guion is not None,
         voz=Avance(
@@ -209,7 +220,7 @@ def calcular_estado(
         ),
         camara=Avance(
             hechas=sum(
-                camara_grabada(config, curso, numero, carpeta, escena)
+                camara_grabada(config, identificador_guion, carpeta, escena)
                 for escena in escenas_camara
             ),
             total=len(escenas_camara),

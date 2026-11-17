@@ -8,7 +8,6 @@ from typing import Annotated, cast
 from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import BaseModel, ConfigDict
 from starlette.requests import ClientDisconnect
-from starlette.responses import Response
 
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
@@ -60,12 +59,15 @@ def obtener_teleprompter(
     request: Request,
     curso: CursoId,
     numero: NumeroLeccion,
-) -> Teleprompter | Response:
+) -> Teleprompter:
     config = _config(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         teleprompter = leer_teleprompter(config, bd, curso, numero)
     if teleprompter is None:
-        return Response(status_code=404)
+        raise HTTPException(
+            status_code=404,
+            detail="La lección no existe o no tiene guion",
+        )
     return teleprompter
 
 

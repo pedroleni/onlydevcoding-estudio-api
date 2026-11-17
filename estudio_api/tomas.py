@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from estudio_api.config import Config
-from estudio_api.lectura import _ruta_publica, datos_curso
+from estudio_api.lectura import _ruta_publica, carpeta_de_trabajo, datos_curso
 from estudio_api.rutas import ruta_segura
 
 TAMANO_MAXIMO_TOMA = 209_715_200
@@ -63,11 +63,13 @@ def _carpeta_y_guion(
     leido = datos_curso(config, curso)
     if leido is None:
         raise LeccionSinGuion
-    carpeta_curso, carpetas, guiones = leido
+    carpeta_curso, _, guiones = leido
     datos_guion = guiones.get(numero)
     if datos_guion is None or not carpeta_curso.is_dir():
         raise LeccionSinGuion
-    carpeta = carpetas[numero][1] if numero in carpetas else datos_guion[1]
+    carpeta = carpeta_de_trabajo(leido, numero)
+    if carpeta is None:
+        raise LeccionSinGuion
     return carpeta, datos_guion[2]
 
 

@@ -2,7 +2,14 @@ import json
 
 import pytest
 
-from estudio_api.lectura import _leer_json, leer_cursos, leer_leccion, leer_lecciones
+from estudio_api.lectura import (
+    _leer_json,
+    carpeta_de_trabajo,
+    datos_curso,
+    leer_cursos,
+    leer_leccion,
+    leer_lecciones,
+)
 from estudio_api.rutas import ruta_segura
 
 
@@ -430,3 +437,25 @@ def test_ruta_segura_rechaza_enlace_fuera(tmp_path):
 
     with pytest.raises(ValueError):
         ruta_segura(raiz, "enlace", "archivo.mp4")
+
+
+def test_carpeta_de_trabajo_prefiere_la_de_disco_y_si_no_la_del_guion(cfg):
+    ruta_guion = cfg.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta_guion.read_text(encoding="utf-8"))
+    guion["carpeta"] = "REACT/04-nombre-del-guion"
+    ruta_guion.write_text(json.dumps(guion), encoding="utf-8")
+    leido = datos_curso(cfg, "react")
+
+    disco = (cfg.cursos_dir / "REACT" / "04-importar-y-exportar").resolve()
+    assert carpeta_de_trabajo(leido, 4) == disco
+
+    disco.rename(disco.with_name("99-apartada"))
+    leido = datos_curso(cfg, "react")
+
+    assert (
+        carpeta_de_trabajo(leido, 4)
+        == (cfg.cursos_dir / "REACT" / "04-nombre-del-guion").resolve()
+    )
+    assert carpeta_de_trabajo(leido, 7) is None
+    assert carpeta_de_trabajo(None, 4) is None
+    assert carpeta_de_trabajo(datos_curso(cfg, "no-existe"), 4) is None
