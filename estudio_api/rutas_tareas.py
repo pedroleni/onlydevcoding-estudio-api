@@ -4,7 +4,7 @@ from datetime import date
 from typing import Annotated, cast
 
 from fastapi import APIRouter, HTTPException, Path, Request, status
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, StrictBool
 from starlette.responses import Response
 
 from estudio_api.config import Config
@@ -16,8 +16,9 @@ from estudio_api.lectura import (
     leer_lecciones,
 )
 from estudio_api.tareas import (
-    ColorTarea,
+    DatosTipoTarea,
     EnlaceTarea,
+    Tarea,
     TareaNueva,
     TipoTarea,
     borrar_tarea,
@@ -49,12 +50,8 @@ class CambioHecha(BaseModel):
     hecha: StrictBool
 
 
-class EdicionTipoTarea(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    nombre: str
-    color: ColorTarea
-    orden: int = Field(strict=True)
+class EdicionTipoTarea(DatosTipoTarea):
+    pass
 
 
 def _config(request: Request) -> Config:
@@ -85,20 +82,32 @@ def _validar_enlace(
             detail="Un curso sin carpeta solo se puede enlazar a nivel de curso",
         )
 
-    resumen = next(
-        (
-            leccion
-            for leccion in leer_lecciones(config, enlace.curso, bd)
-            if leccion.numero == enlace.numero
-        ),
-        None,
-    )
+    try:
+        resumen = next(
+            (
+                leccion
+                for leccion in leer_lecciones(config, enlace.curso, bd)
+                if leccion.numero == enlace.numero
+            ),
+            None,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No se ha podido leer la lección",
+        ) from error
     if resumen is None or carpeta_leccion(config, enlace.curso, enlace.numero) is None:
         raise HTTPException(status_code=422, detail="La lección no existe")
     if enlace.pieza is None:
         return
 
-    leccion = leer_leccion(config, enlace.curso, enlace.numero, bd)
+    try:
+        leccion = leer_leccion(config, enlace.curso, enlace.numero, bd)
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail="No se ha podido leer la lección",
+        ) from error
     if leccion is None:
         raise HTTPException(status_code=422, detail="La lección no existe")
     if all(pieza.id != enlace.pieza for pieza in leccion.piezas):
@@ -118,7 +127,7 @@ def _validar_tarea_nueva(
 def _vista_unica(
     config: Config,
     bd: sqlite3.Connection,
-    tarea,
+    tarea: Tarea,
 ) -> TareaVista:
     return construir_vistas_tareas(config, bd, [tarea])[0]
 

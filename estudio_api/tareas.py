@@ -111,18 +111,10 @@ class Tarea(TareaNueva):
     hecha_en: datetime | None
 
 
-class TipoTarea(_ModeloEstricto):
-    id: str
+class DatosTipoTarea(_ModeloEstricto):
     nombre: str
     color: ColorTarea
-    orden: int = Field(strict=True)
-
-    @field_validator("id")
-    @classmethod
-    def validar_id(cls, valor: str) -> str:
-        if _PATRON_TIPO.fullmatch(valor) is None:
-            raise ValueError("El id del tipo no es válido")
-        return valor
+    orden: int = Field(strict=True, ge=0, le=10_000)
 
     @field_validator("nombre")
     @classmethod
@@ -131,6 +123,17 @@ class TipoTarea(_ModeloEstricto):
         if not 1 <= len(recortado) <= 40:
             raise ValueError("El nombre debe tener entre 1 y 40 caracteres")
         return recortado
+
+
+class TipoTarea(DatosTipoTarea):
+    id: str
+
+    @field_validator("id")
+    @classmethod
+    def validar_id(cls, valor: str) -> str:
+        if _PATRON_TIPO.fullmatch(valor) is None:
+            raise ValueError("El id del tipo no es válido")
+        return valor
 
 
 class CursoApp(_ModeloEstricto):

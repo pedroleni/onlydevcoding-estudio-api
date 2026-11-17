@@ -5,12 +5,13 @@ from pydantic import BaseModel, ConfigDict
 from estudio_api.config import Config
 from estudio_api.lectura import (
     carpeta_leccion,
+    curso_en_disco,
     leer_cursos,
     leer_leccion,
     leer_lecciones,
 )
 from estudio_api.modelos import Curso, Leccion, LeccionResumen
-from estudio_api.tareas import Tarea
+from estudio_api.tareas import Tarea, cursos_app
 
 
 class EnlaceVista(BaseModel):
@@ -38,6 +39,7 @@ class _CacheEnlaces:
         self.config = config
         self.bd = bd
         self._cursos: dict[str, Curso] | None = None
+        self._cursos_app: dict[str, str] | None = None
         self._lecciones: dict[str, dict[int, LeccionResumen]] = {}
         self._detalles: dict[tuple[str, int], Leccion | None] = {}
         self._carpetas: dict[tuple[str, int], bool] = {}
@@ -49,7 +51,26 @@ class _CacheEnlaces:
             except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
                 cursos = []
             self._cursos = {curso.id: curso for curso in cursos}
-        return self._cursos.get(identificador)
+        curso = self._cursos.get(identificador)
+        if curso is not None:
+            return curso
+
+        if self._cursos_app is None:
+            self._cursos_app = {curso.id: curso.nombre for curso in cursos_app(self.bd)}
+        nombre_app = self._cursos_app.get(identificador)
+        en_disco = curso_en_disco(self.config, identificador)
+        if not en_disco and nombre_app is None:
+            return None
+
+        curso = Curso(
+            id=identificador,
+            nombre=nombre_app or identificador,
+            carpeta=None,
+            lecciones=0,
+            en_disco=en_disco,
+        )
+        self._cursos[identificador] = curso
+        return curso
 
     def _resumenes(self, curso: str) -> dict[int, LeccionResumen]:
         if curso not in self._lecciones:

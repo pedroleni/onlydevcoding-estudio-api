@@ -1,5 +1,6 @@
 from contextlib import closing
 from datetime import date, timedelta
+from shutil import rmtree
 
 import pytest
 
@@ -103,6 +104,18 @@ def test_get_tareas_devuelve_solo_las_atrasadas_pendientes(cliente, cfg):
     assert [tarea["texto"] for tarea in respuesta.json()["tareas"]] == ["Hoy"]
 
 
+def test_get_tareas_no_devuelve_atrasadas_si_no_se_piden(cliente, cfg):
+    _crear_en_bd(cfg, fecha="2026-11-16", texto="Pendiente de ayer")
+
+    respuesta = cliente.get(
+        "/api/tareas",
+        params={"desde": "2026-11-17", "hasta": "2026-11-17"},
+    )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["atrasadas"] == []
+
+
 def test_crear_tarea_con_enlace_valido_resuelve_los_titulos(cliente_con_token):
     respuesta = cliente_con_token.post(
         "/api/tareas",
@@ -169,6 +182,24 @@ def test_curso_sin_carpeta_solo_se_enlaza_a_nivel_de_curso(cliente_con_token, cf
     assert valida.status_code == 201
     assert valida.json()["enlace_vista"] == {
         "curso_nombre": "Python",
+        "leccion_titulo": None,
+        "pieza_titulo": None,
+        "roto": False,
+    }
+
+
+def test_enlace_a_carpeta_de_curso_vacia_no_esta_roto(cliente_con_token, cfg):
+    (cfg.cursos_dir / "VACIO").mkdir()
+
+    respuesta = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json=_nueva(enlace={"curso": "vacio"}),
+    )
+
+    assert respuesta.status_code == 201
+    assert respuesta.json()["enlace_vista"] == {
+        "curso_nombre": "vacio",
         "leccion_titulo": None,
         "pieza_titulo": None,
         "roto": False,
@@ -265,6 +296,24 @@ def test_enlace_a_leccion_renombrada_se_conserva_como_roto(cliente, cfg):
     assert vista["enlace_vista"]["pieza_titulo"] is None
 
 
+def test_enlace_a_leccion_de_curso_borrado_conserva_la_tarea(cliente, cfg):
+    tarea = _crear_en_bd(
+        cfg,
+        enlace={"curso": "react", "numero": 4, "pieza": "leccion"},
+    )
+    rmtree(cfg.cursos_dir / "REACT")
+
+    respuesta = cliente.get(
+        "/api/tareas",
+        params={"desde": "2026-11-17", "hasta": "2026-11-17"},
+    )
+
+    assert respuesta.status_code == 200
+    vista = next(t for t in respuesta.json()["tareas"] if t["id"] == tarea.id)
+    assert vista["enlace_vista"]["roto"] is True
+    assert vista["enlace_vista"]["curso_nombre"] is None
+
+
 def test_excepcion_al_leer_guion_no_tumba_el_listado(cliente, cfg, monkeypatch):
     from estudio_api import vista_tareas
 
@@ -289,7 +338,36 @@ def test_excepcion_al_leer_guion_no_tumba_el_listado(cliente, cfg, monkeypatch):
     assert vista["enlace_vista"]["pieza_titulo"] is None
 
 
-def test_vista_lee_una_leccion_una_sola_vez_por_peticion(cliente, cfg, monkeypatch):
+@pytest.mark.parametrize("lector", ["leer_lecciones", "leer_leccion"])
+def test_crear_tarea_convierte_error_de_guion_en_422(
+    cliente_con_token, cfg, monkeypatch, lector
+):
+    from estudio_api import rutas_tareas
+
+    (cfg.estudio_dir / "lecciones" / "react-04.json").write_text(
+        "{json corrupto",
+        encoding="utf-8",
+    )
+
+    def lectura_corrupta(*_args, **_kwargs):
+        raise ValueError("guion ficticio corrupto")
+
+    monkeypatch.setattr(rutas_tareas, lector, lectura_corrupta)
+    enlace = {"curso": "react", "numero": 4}
+    if lector == "leer_leccion":
+        enlace["pieza"] = "leccion"
+
+    respuesta = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json=_nueva(enlace=enlace),
+    )
+
+    assert respuesta.status_code == 422
+    assert respuesta.json()["detail"] == "No se ha podido leer la lección"
+
+
+def test_vista_cachea_curso_resumenes_y_leccion_por_peticion(cliente, cfg, monkeypatch):
     from estudio_api import vista_tareas
 
     for indice in range(3):
@@ -299,15 +377,22 @@ def test_vista_lee_una_leccion_una_sola_vez_por_peticion(cliente, cfg, monkeypat
             enlace={"curso": "react", "numero": 4, "pieza": "reel-salida"},
         )
 
-    original = vista_tareas.leer_leccion
-    llamadas = 0
+    originales = {
+        "leer_cursos": vista_tareas.leer_cursos,
+        "leer_lecciones": vista_tareas.leer_lecciones,
+        "leer_leccion": vista_tareas.leer_leccion,
+    }
+    llamadas = {nombre: 0 for nombre in originales}
 
-    def contar(*args, **kwargs):
-        nonlocal llamadas
-        llamadas += 1
-        return original(*args, **kwargs)
+    def contador(nombre):
+        def contar(*args, **kwargs):
+            llamadas[nombre] += 1
+            return originales[nombre](*args, **kwargs)
 
-    monkeypatch.setattr(vista_tareas, "leer_leccion", contar)
+        return contar
+
+    for nombre in originales:
+        monkeypatch.setattr(vista_tareas, nombre, contador(nombre))
 
     respuesta = cliente.get(
         "/api/tareas",
@@ -316,7 +401,11 @@ def test_vista_lee_una_leccion_una_sola_vez_por_peticion(cliente, cfg, monkeypat
 
     assert respuesta.status_code == 200
     assert len(respuesta.json()["tareas"]) == 3
-    assert llamadas == 1
+    assert llamadas == {
+        "leer_cursos": 1,
+        "leer_lecciones": 1,
+        "leer_leccion": 1,
+    }
 
 
 def test_crud_de_tarea_y_booleano_de_hecha_es_estricto(cliente_con_token):
@@ -442,6 +531,36 @@ def test_crud_de_tipos_y_orden_del_listado(cliente_con_token):
     )
 
 
+@pytest.mark.parametrize("nombre", ["  ", "x" * 41])
+def test_editar_tipo_rechaza_nombre_invalido(cliente_con_token, nombre):
+    respuesta = cliente_con_token.put(
+        "/api/tipos-tarea/grabar",
+        headers=CABECERAS,
+        json={"nombre": nombre, "color": "#E5534B", "orden": 1},
+    )
+
+    assert respuesta.status_code == 422
+
+
+@pytest.mark.parametrize("orden", [10**30, -1])
+@pytest.mark.parametrize("metodo", ["post", "put"])
+def test_escribir_tipo_rechaza_orden_fuera_de_rango(cliente_con_token, metodo, orden):
+    cuerpo = {"nombre": "Revisar", "color": "#299BC6", "orden": orden}
+    ruta = "/api/tipos-tarea/revisar"
+    if metodo == "post":
+        ruta = "/api/tipos-tarea"
+        cuerpo["id"] = "revisar"
+
+    respuesta = cliente_con_token.request(
+        metodo,
+        ruta,
+        headers=CABECERAS,
+        json=cuerpo,
+    )
+
+    assert respuesta.status_code == 422
+
+
 def test_borrar_tipo_en_uso_da_409_y_conserva_la_tarea(cliente_con_token, cfg):
     tarea = _crear_en_bd(cfg, tipo="grabar")
 
@@ -462,7 +581,25 @@ def test_borrar_tipo_en_uso_da_409_y_conserva_la_tarea(cliente_con_token, cfg):
     ("metodo", "ruta", "json"),
     [
         ("post", "/api/tareas", _nueva()),
+        ("put", "/api/tareas/1", _nueva()),
+        ("put", "/api/tareas/1/hecha", {"hecha": True}),
         ("delete", "/api/tareas/1", None),
+        (
+            "post",
+            "/api/tipos-tarea",
+            {
+                "id": "revisar",
+                "nombre": "Revisar",
+                "color": "#299BC6",
+                "orden": 1,
+            },
+        ),
+        (
+            "put",
+            "/api/tipos-tarea/grabar",
+            {"nombre": "Grabar", "color": "#E5534B", "orden": 1},
+        ),
+        ("delete", "/api/tipos-tarea/grabar", None),
     ],
 )
 def test_escrituras_de_tareas_sin_token_devuelven_401(
