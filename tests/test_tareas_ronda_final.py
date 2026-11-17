@@ -253,3 +253,17 @@ def test_migrar_desde_v1_guarda_una_copia(tmp_path):
     with closing(sqlite3.connect(copia)) as bd:
         assert bd.execute("PRAGMA user_version").fetchone()[0] == 1
         assert bd.execute("SELECT ruta FROM portada_elegida").fetchall() == [("a.jpg",)]
+
+
+def test_la_copia_v1_no_se_sustituye_por_una_base_ya_migrada(tmp_path):
+    # Si otra apertura migró entretanto, la copia leída sería v2: no debe instalarse.
+    from estudio_api.decisiones import _copia_antes_de_migrar
+
+    ruta = tmp_path / "estudio.sqlite3"
+    with closing(sqlite3.connect(ruta)) as bd:
+        bd.execute("PRAGMA user_version = 2")
+        bd.commit()
+        _copia_antes_de_migrar(bd, ruta)
+
+    assert not (tmp_path / "estudio.sqlite3.v1").exists()
+    assert list(tmp_path.glob(".estudio.sqlite3.v1.*")) == []

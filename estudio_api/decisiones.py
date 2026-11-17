@@ -125,7 +125,10 @@ def _copia_antes_de_migrar(bd: sqlite3.Connection, ruta: Path) -> None:
     try:
         with closing(sqlite3.connect(temporal)) as copia:
             bd.backup(copia)
-        os.replace(temporal, destino)
+            version = copia.execute("PRAGMA user_version").fetchone()[0]
+        # Otra apertura pudo migrar entretanto: una copia ya en v2 no sirve de respaldo.
+        if version == 1:
+            os.replace(temporal, destino)
     finally:
         temporal.unlink(missing_ok=True)
 
