@@ -206,6 +206,9 @@ def test_elegir_portada_regenera_una_guia_creada_por_la_app(cliente_con_token, c
 
 
 def test_elegir_portada_no_modifica_una_guia_manual_sin_copia(cliente_con_token, cfg):
+    # Con JSON y conversor presentes, lo único que impide regenerar es que falte la copia.
+    _escribir_publicacion(cfg)
+    _instalar_script_html(cfg)
     publicar = _carpeta_leccion(cfg) / "publicar"
     markdown = publicar / "PUBLICAR-leccion-4.md"
     markdown.write_text("guía manual intacta", encoding="utf-8")
