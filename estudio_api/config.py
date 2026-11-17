@@ -9,10 +9,14 @@ class Config(BaseModel):
     cursos_dir: Path
     estudio_dir: Path
     origen_web: str = "http://127.0.0.1:3000"
+    token_escritura: str | None = None
+    bd_ruta: Path = Path("datos/estudio.sqlite3")
 
 
 def _valor_config(nombre: str, archivo_env: dict[str, str | None]) -> str | None:
-    return os.environ.get(nombre) or archivo_env.get(nombre)
+    if nombre in os.environ:
+        return os.environ[nombre]
+    return archivo_env.get(nombre)
 
 
 def _directorio_configurado(
@@ -36,8 +40,20 @@ def cargar_config() -> Config:
     cursos_dir = _directorio_configurado("CURSOS_DIR", archivo_env)
     estudio_dir = _directorio_configurado("ESTUDIO_DIR", archivo_env)
     origen_web = _valor_config("ORIGEN_WEB", archivo_env) or "http://127.0.0.1:3000"
+    token_escritura = _valor_config("ESTUDIO_TOKEN", archivo_env)
+    if (
+        token_escritura is None
+        or not token_escritura.strip()
+        or len(token_escritura) < 32
+    ):
+        token_escritura = None
+    bd_ruta = Path(
+        _valor_config("BD_RUTA", archivo_env) or "datos/estudio.sqlite3"
+    ).expanduser()
     return Config(
         cursos_dir=cursos_dir,
         estudio_dir=estudio_dir,
         origen_web=origen_web,
+        token_escritura=token_escritura,
+        bd_ruta=bd_ruta,
     )

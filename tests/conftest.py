@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from estudio_api.app import crear_app
 from estudio_api.config import Config
+from tests.ayudas import TOKEN
 
 
 @pytest.fixture
@@ -104,7 +105,11 @@ def cfg(tmp_path):
         encoding="utf-8",
     )
 
-    yield Config(cursos_dir=cursos_dir, estudio_dir=estudio_dir)
+    yield Config(
+        cursos_dir=cursos_dir,
+        estudio_dir=estudio_dir,
+        bd_ruta=tmp_path / "datos" / "estudio.sqlite3",
+    )
 
     archivo_fuera.unlink(missing_ok=True)
 
@@ -113,6 +118,16 @@ def cfg(tmp_path):
 def cliente(cfg):
     with TestClient(
         crear_app(cfg),
+        base_url="http://127.0.0.1:8000",
+    ) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def cliente_con_token(cfg):
+    config = cfg.model_copy(update={"token_escritura": TOKEN})
+    with TestClient(
+        crear_app(config),
         base_url="http://127.0.0.1:8000",
     ) as test_client:
         yield test_client

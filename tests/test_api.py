@@ -1,5 +1,7 @@
 import pytest
 
+from tests.test_publicar_api import RUTA_PUBLICACION, _carpeta_leccion
+
 
 def test_cursos(cliente):
     respuesta = cliente.get("/api/cursos")
@@ -45,3 +47,17 @@ def test_numero_fuera_de_rango(cliente, numero):
         404,
         422,
     )
+
+
+def test_publicacion_corrupta_no_rompe_los_endpoints_de_la_leccion(cliente, cfg):
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    ruta.write_text("{json roto", encoding="utf-8")
+
+    publicacion = cliente.get(RUTA_PUBLICACION)
+    detalle = cliente.get("/api/cursos/react/lecciones/4")
+    lista = cliente.get("/api/cursos/react/lecciones")
+
+    assert publicacion.status_code == 200
+    assert publicacion.json()["error"] == "No se ha podido leer publicacion.json"
+    assert detalle.status_code == 200
+    assert lista.status_code == 200

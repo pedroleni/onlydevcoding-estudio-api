@@ -1,6 +1,67 @@
-from typing import Literal
+from datetime import datetime
+from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+HOSTS_PUBLICACION = frozenset(
+    {
+        "youtube.com",
+        "www.youtube.com",
+        "youtu.be",
+        "instagram.com",
+        "www.instagram.com",
+        "tiktok.com",
+        "www.tiktok.com",
+        "linkedin.com",
+        "www.linkedin.com",
+    }
+)
+
+
+class EstadoRed(BaseModel):
+    estado: Literal["pendiente", "programado", "publicado"]
+    fecha: datetime | None = None
+    url: str | None = None
+
+    @model_validator(mode="after")
+    def validar_estado(self) -> Self:
+        if self.url is not None:
+            if any(
+                caracter.isspace() or ord(caracter) < 32 or ord(caracter) == 127
+                for caracter in self.url
+            ):
+                raise ValueError("La URL de publicación no es válida")
+            try:
+                url = urlsplit(self.url)
+                puerto = url.port
+            except ValueError as error:
+                raise ValueError("La URL de publicación no es válida") from error
+            if (
+                url.scheme != "https"
+                or url.hostname not in HOSTS_PUBLICACION
+                or url.username is not None
+                or url.password is not None
+                or puerto is not None
+                or url.netloc.endswith(":")
+            ):
+                raise ValueError("La URL de publicación no está permitida")
+
+        if self.estado == "pendiente":
+            if self.fecha is not None or self.url is not None:
+                raise ValueError("Un estado pendiente no lleva fecha ni URL")
+            return self
+
+        if self.estado == "programado" and self.fecha is None:
+            raise ValueError("Un estado programado exige fecha")
+
+        if self.estado == "publicado" and self.fecha is None:
+            self.fecha = datetime.now().astimezone()
+
+        if self.fecha is not None and self.fecha.tzinfo is None:
+            self.fecha = self.fecha.astimezone()
+
+        return self
 
 
 class Avance(BaseModel):

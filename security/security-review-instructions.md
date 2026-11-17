@@ -27,8 +27,35 @@ ruta de explotación concreta.
   ella los medios entre `127.0.0.1:3000` y `127.0.0.1:8000`.
 - CORS no sustituye las comprobaciones de `Host` y `Origin`.
 - La fase 1 es de solo lectura en `CURSOS_DIR` y `ESTUDIO_DIR`.
+- Toda petición distinta de `GET`, `HEAD` y `OPTIONS` exige
+  `X-Estudio-Token`, comparado con `ESTUDIO_TOKEN` mediante
+  `hmac.compare_digest`. Si falta la configuración se devuelve 503; si falta la
+  cabecera o no coincide, 401. El token configurado debe tener 32 caracteres o
+  más. Todo WebSocket exige también el token y se cierra con 1008 si falta o no
+  coincide. Debe haber un único `Content-Length` decimal; `Transfer-Encoding`,
+  una longitud ausente o inválida reciben 411. Se cuentan además los bytes que
+  llegan por ASGI: superar 256 KB o la longitud declarada recibe 413. CORS
+  continúa permitiendo solo `GET`.
+- Las únicas escrituras permitidas bajo `CURSOS_DIR` son
+  `publicar/publicacion.json`, `publicar/PUBLICAR-leccion-N.md` y
+  `publicar/PUBLICAR-leccion-N.html` dentro de una lección. Se escriben en un
+  temporal de la misma carpeta, se sustituyen con `os.replace` y conservan una
+  única copia `<archivo>.antes-de-editar`. La carpeta `publicar` y cada destino
+  deben ser rutas literales, no enlaces simbólicos, aunque el enlace permanezca
+  dentro de `CURSOS_DIR`. No se escribe en `ESTUDIO_DIR`.
 - Los tests usan datos ficticios bajo `tmp_path`; no deben incorporar rutas ni
   contenido reales.
+- La única ejecución de procesos permitida en esta fase es la llamada concreta
+  a `herramientas/publicar/md-a-html.py` para regenerar una guía HTML. Usa
+  `sys.executable -I` y la ruta fija del script dentro de `ESTUDIO_DIR`, una
+  lista de argumentos, `shell=False`, un entorno limitado a `PATH`, `HOME` y
+  `LANG`, salida estándar y error capturados, un grupo de procesos propio, un
+  timeout de 60 segundos y `cwd` en la carpeta `publicar/` validada dentro de
+  `CURSOS_DIR`. Si vence el timeout se mata el grupo completo con `os.killpg` y
+  se intenta recoger el proceso durante un máximo adicional de 5 segundos. Las
+  rutas de entrada, salida e imagen se validan dentro de esas raíces; la imagen
+  se pasa como ruta absoluta y el HTML se genera en un temporal de `publicar/`
+  y se instala de forma atómica.
 
 ## Hallazgos prioritarios
 
