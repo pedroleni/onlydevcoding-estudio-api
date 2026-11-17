@@ -52,6 +52,44 @@ def _crear_bd_v1(ruta):
         )
 
 
+def _crear_bd_v2(ruta):
+    _crear_bd_v1(ruta)
+    with closing(sqlite3.connect(ruta)) as bd:
+        bd.executescript(
+            """
+            CREATE TABLE tipo_tarea (
+                id TEXT PRIMARY KEY,
+                nombre TEXT NOT NULL,
+                color TEXT NOT NULL,
+                orden INTEGER NOT NULL
+            );
+            CREATE TABLE curso_app (
+                id TEXT PRIMARY KEY,
+                nombre TEXT NOT NULL
+            );
+            CREATE TABLE tarea (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                hora TEXT,
+                texto TEXT NOT NULL,
+                tipo TEXT NOT NULL REFERENCES tipo_tarea(id),
+                curso TEXT,
+                numero INTEGER,
+                pieza TEXT,
+                red TEXT,
+                hecha INTEGER NOT NULL DEFAULT 0,
+                hecha_en TEXT
+            );
+            CREATE INDEX idx_tarea_fecha ON tarea(fecha);
+            INSERT INTO tipo_tarea VALUES ('grabar', 'Grabar', '#E5534B', 1);
+            INSERT INTO tarea
+                (fecha, texto, tipo, curso, numero)
+            VALUES ('2026-11-17', 'Tarea ficticia', 'grabar', 'curso-prueba', 2);
+            PRAGMA user_version = 2;
+            """
+        )
+
+
 def test_elegir_portada_sustituye_la_anterior(tmp_path):
     with closing(abrir_bd(tmp_path / "datos" / "estudio.sqlite3")) as bd:
         elegir_portada(bd, "curso-prueba", 2, "leccion", "portada-a.jpg")
@@ -194,7 +232,7 @@ def test_abrir_dos_veces_conserva_datos_y_esquema(tmp_path):
             "youtube",
             EstadoRed(estado="publicado", url="https://youtu.be/abc"),
         )
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 3
         tablas = {
             fila[0]
             for fila in bd.execute(
@@ -210,11 +248,11 @@ def test_abrir_dos_veces_conserva_datos_y_esquema(tmp_path):
         )
 
 
-def test_abrir_bd_vacia_crea_version_2_y_siembra_tipos_una_vez(tmp_path):
+def test_abrir_bd_vacia_crea_version_3_y_siembra_tipos_una_vez(tmp_path):
     ruta_bd = tmp_path / "estudio.sqlite3"
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 3
         assert bd.execute(
             "SELECT id, nombre, color, orden FROM tipo_tarea ORDER BY orden"
         ).fetchall() == [
@@ -239,7 +277,7 @@ def test_abrir_bd_migra_v1_y_conserva_sus_filas(tmp_path):
     _crear_bd_v1(ruta_bd)
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 3
         assert bd.execute("SELECT * FROM portada_elegida").fetchall() == [
             ("curso-prueba", 2, "leccion", "portada.jpg")
         ]
@@ -268,6 +306,79 @@ def test_abrir_bd_migra_v1_y_conserva_sus_filas(tmp_path):
             ("publicar",),
             ("otro",),
         ]
+        assert bd.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trabajo'"
+        ).fetchone() == ("trabajo",)
+
+
+def test_abrir_bd_migra_v2_conserva_filas_y_guarda_copia(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    _crear_bd_v2(ruta_bd)
+
+    with closing(abrir_bd(ruta_bd)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert bd.execute(
+            "SELECT curso, numero, pieza, ruta FROM portada_elegida"
+        ).fetchall() == [("curso-prueba", 2, "leccion", "portada.jpg")]
+        assert bd.execute(
+            "SELECT fecha, texto, tipo, curso, numero FROM tarea"
+        ).fetchall() == [("2026-11-17", "Tarea ficticia", "grabar", "curso-prueba", 2)]
+        columnas = bd.execute("PRAGMA table_info(trabajo)").fetchall()
+        assert [columna[1] for columna in columnas] == [
+            "id",
+            "accion",
+            "curso",
+            "numero",
+            "estado",
+            "progreso",
+            "inicio",
+            "fin",
+            "error",
+            "registro",
+            "temporal",
+        ]
+
+    copia = ruta_bd.with_name(f"{ruta_bd.name}.v2")
+    assert copia.is_file()
+    with closing(sqlite3.connect(copia)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("SELECT texto FROM tarea").fetchall() == [("Tarea ficticia",)]
+        assert (
+            bd.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trabajo'"
+            ).fetchone()
+            is None
+        )
+
+
+def test_fallo_al_crear_trabajo_deja_la_base_en_v2(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    _crear_bd_v2(ruta_bd)
+    conectar_real = sqlite3.connect
+
+    class ConexionConFallo(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            if "CREATE TABLE trabajo" in sql:
+                raise sqlite3.OperationalError("fallo forzado al crear trabajo")
+            return super().execute(sql, parameters)
+
+    def conectar_con_fallo(ruta):
+        return conectar_real(ruta, factory=ConexionConFallo)
+
+    monkeypatch.setattr("estudio_api.decisiones.sqlite3.connect", conectar_con_fallo)
+
+    with pytest.raises(sqlite3.OperationalError, match="fallo forzado"):
+        abrir_bd(ruta_bd)
+
+    with closing(conectar_real(ruta_bd)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("SELECT texto FROM tarea").fetchall() == [("Tarea ficticia",)]
+        assert (
+            bd.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trabajo'"
+            ).fetchone()
+            is None
+        )
 
 
 def test_dos_aperturas_simultaneas_migran_v1_una_sola_vez(tmp_path, monkeypatch):
@@ -298,9 +409,9 @@ def test_dos_aperturas_simultaneas_migran_v1_una_sola_vez(tmp_path, monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as ejecutor:
         versiones = list(ejecutor.map(lambda _: abrir_y_cerrar(), range(2)))
 
-    assert versiones == [2, 2]
+    assert versiones == [3, 3]
     with closing(conectar_real(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 3
         assert bd.execute("SELECT COUNT(*) FROM tipo_tarea").fetchone()[0] == 5
 
 
@@ -357,13 +468,13 @@ def test_fallo_de_migracion_revierte_ddl_siembra_y_version(tmp_path, monkeypatch
         assert tablas == {"portada_elegida", "estado_red"}
 
 
-def test_abrir_bd_rechaza_version_3(tmp_path):
+def test_abrir_bd_rechaza_version_4(tmp_path):
     ruta_bd = tmp_path / "estudio.sqlite3"
     with closing(sqlite3.connect(ruta_bd)) as bd:
-        bd.execute("PRAGMA user_version = 3")
+        bd.execute("PRAGMA user_version = 4")
 
     with pytest.raises(
-        RuntimeError, match="Versión de la base de datos no soportada: 3"
+        RuntimeError, match="Versión de la base de datos no soportada: 4"
     ):
         abrir_bd(ruta_bd)
 

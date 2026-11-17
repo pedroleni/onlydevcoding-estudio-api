@@ -1,14 +1,21 @@
+from contextlib import closing
+
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
 from estudio_api.config import Config, cargar_config
+from estudio_api.decisiones import abrir_bd
 from estudio_api.rutas_api import router as router_api
 from estudio_api.rutas_publicar import router as router_publicar
 from estudio_api.rutas_tareas import router as router_tareas
 from estudio_api.seguridad import SeguridadLocalMiddleware
+from estudio_api.trabajos import interrumpir_huerfanos
 
 
 def crear_app(config: Config) -> FastAPI:
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        interrumpir_huerfanos(bd)
+
     # Sin /docs, /redoc ni /openapi.json: cargan JavaScript de un CDN en el
     # mismo origen que la API y podrían leer guiones y medios.
     aplicacion = FastAPI(
