@@ -158,7 +158,7 @@ def test_salida_con_retorno_de_carro_actualiza_el_progreso(tmp_path):
             "-c",
             (
                 "import sys; "
-                "sys.stdout.buffer.write(b'Preparando\\n1/2\\r2/2\\r'); "
+                "sys.stdout.buffer.write(b'Bundling\\n\\rRendered 1/2\\rRendered 2/2\\n'); "
                 "sys.stdout.flush()"
             ),
         ],
@@ -170,7 +170,7 @@ def test_salida_con_retorno_de_carro_actualiza_el_progreso(tmp_path):
 
     terminado = _leer(ruta_bd, trabajo.id)
     assert terminado.progreso == 1.0
-    assert terminado.registro == ["Preparando", "2/2"]
+    assert terminado.registro == ["Bundling", "Rendered 2/2"]
 
 
 def test_salida_utf8_partida_entre_trozos_se_decodifica_una_sola_vez(
@@ -259,7 +259,7 @@ def test_fallo_al_guardar_avance_no_mata_el_render_y_se_reintenta(
 
     tiempos = iter([0.0, 2.0, 4.0])
     monkeypatch.setattr(modulo_trabajos, "_guardar_avance", guardar_inestable)
-    monkeypatch.setattr(modulo_trabajos.time, "monotonic", lambda: next(tiempos))
+    monkeypatch.setattr(modulo_trabajos, "monotonic", lambda: next(tiempos))
 
     class Salida:
         def __init__(self):
@@ -356,6 +356,77 @@ def test_finalizar_no_modifica_un_trabajo_ya_interrumpido(tmp_path):
     assert trabajo.estado == "interrumpido"
     assert trabajo.progreso == 0.0
     assert trabajo.registro == []
+
+
+def test_finalizar_se_reintenta_tras_un_fallo_transitorio(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    finalizar_real = modulo_trabajos._finalizar
+    llamadas = 0
+
+    def finalizar_inestable(*args):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            raise OSError("fallo transitorio ficticio")
+        finalizar_real(*args)
+
+    monkeypatch.setattr(modulo_trabajos, "_finalizar", finalizar_inestable)
+    trabajo = lanzar(
+        ruta_bd,
+        "finalizacion-inestable",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(trabajo.id, 5)
+
+    assert llamadas == 2
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+
+
+def test_doble_fallo_al_finalizar_no_bloquea_lanzamientos(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    finalizar_real = modulo_trabajos._finalizar
+    llamadas = 0
+
+    def finalizar_roto(*_args):
+        nonlocal llamadas
+        llamadas += 1
+        raise OSError("fallo persistente ficticio")
+
+    monkeypatch.setattr(modulo_trabajos, "_finalizar", finalizar_roto)
+    primero = lanzar(
+        ruta_bd,
+        "finalizacion-rota",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(primero.id, 5)
+    assert llamadas == 2
+    assert _leer(ruta_bd, primero.id).estado == "en_marcha"
+
+    monkeypatch.setattr(modulo_trabajos, "_finalizar", finalizar_real)
+    siguiente = lanzar(
+        ruta_bd,
+        "siguiente",
+        None,
+        None,
+        [sys.executable, "-c", "pass"],
+        tmp_path,
+        None,
+        None,
+    )
+    esperar(siguiente.id, 5)
+
+    assert _leer(ruta_bd, primero.id).estado == "interrumpido"
+    assert _leer(ruta_bd, siguiente.id).estado == "hecho"
 
 
 def test_popen_recibe_stdin_devnull(tmp_path, monkeypatch):

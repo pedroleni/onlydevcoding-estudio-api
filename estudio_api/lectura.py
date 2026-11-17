@@ -50,15 +50,23 @@ def _entradas_seguras(raiz: Path, directorio: Path) -> list[Path]:
     return entradas
 
 
-def _leer_json(ruta: Path) -> dict[str, Any] | None:
+def _leer_json_y_bytes(ruta: Path) -> tuple[dict[str, Any], bytes] | None:
     try:
-        with ruta.open(encoding="utf-8") as archivo:
+        with ruta.open("rb") as archivo:
             if os.fstat(archivo.fileno()).st_size > MAX_TAMANO_JSON:
                 return None
-            datos = json.load(archivo)
+            contenido = archivo.read()
+            if len(contenido) > MAX_TAMANO_JSON:
+                return None
+        datos = json.loads(contenido.decode("utf-8"))
     except OSError, UnicodeError, RecursionError, ValueError:
         return None
-    return datos if isinstance(datos, dict) else None
+    return (datos, contenido) if isinstance(datos, dict) else None
+
+
+def _leer_json(ruta: Path) -> dict[str, Any] | None:
+    lectura = _leer_json_y_bytes(ruta)
+    return lectura[0] if lectura is not None else None
 
 
 def _texto(valor: object, defecto: str = "") -> str:
@@ -162,14 +170,14 @@ def _guiones_curso(
     config: Config,
     identificador: str,
     nombre_curso: str,
-) -> dict[int, tuple[str, Path, dict[str, Any]]]:
+) -> dict[int, tuple[str, Path, dict[str, Any], Path, bytes]]:
     try:
         directorio = ruta_segura(config.estudio_dir, "lecciones")
     except ValueError:
         return {}
 
     patron = re.compile(rf"^{re.escape(identificador)}-(\d{{2,3}})\.json$")
-    guiones: dict[int, tuple[str, Path, dict[str, Any]]] = {}
+    guiones: dict[int, tuple[str, Path, dict[str, Any], Path, bytes]] = {}
     for ruta in _entradas_seguras(config.estudio_dir, directorio):
         coincidencia = patron.fullmatch(ruta.name)
         if not ruta.is_file() or coincidencia is None:
@@ -177,14 +185,15 @@ def _guiones_curso(
         numero = int(coincidencia.group(1))
         if not 1 <= numero <= 999:
             continue
-        datos = _leer_json(ruta)
-        if datos is None:
+        lectura = _leer_json_y_bytes(ruta)
+        if lectura is None:
             continue
+        datos, contenido = lectura
         carpeta = _carpeta_desde_guion(config, datos, nombre_curso, numero)
         if carpeta is None:
             continue
         slug, ruta_carpeta = carpeta
-        guiones.setdefault(numero, (slug, ruta_carpeta, datos))
+        guiones.setdefault(numero, (slug, ruta_carpeta, datos, ruta, contenido))
     return guiones
 
 
@@ -195,7 +204,7 @@ def _datos_curso(
     tuple[
         Path,
         dict[int, tuple[str, Path]],
-        dict[int, tuple[str, Path, dict[str, Any]]],
+        dict[int, tuple[str, Path, dict[str, Any], Path, bytes]],
     ]
     | None
 ):
@@ -223,19 +232,12 @@ def ruta_guion(
     numero: int,
     datos: Any = _SIN_DATOS,
 ) -> Path | None:
-    """Ruta del guion ya validado por ``datos_curso``, sin volver a leerlo."""
+    """Ruta real del guion elegido y validado por ``datos_curso``."""
     leido = _datos_curso(config, curso) if datos is _SIN_DATOS else datos
-    if leido is None or numero not in leido[2]:
+    if leido is None:
         return None
-    try:
-        ruta = ruta_segura(
-            config.estudio_dir,
-            "lecciones",
-            f"{curso}-{numero:02d}.json",
-        )
-    except ValueError:
-        return None
-    return ruta if ruta.is_file() else None
+    guion = leido[2].get(numero)
+    return guion[3] if guion is not None else None
 
 
 def carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:

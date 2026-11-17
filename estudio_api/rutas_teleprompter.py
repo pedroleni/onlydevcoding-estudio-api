@@ -70,7 +70,7 @@ def generar_previa_grabacion(
         raise HTTPException(status_code=404, detail="La lección no existe")
 
     montaje = ruta_montaje(config, teleprompter.guion)
-    if montaje is None or not montaje.is_file():
+    if montaje is None or not montaje.is_file() or teleprompter.montaje is None:
         raise HTTPException(
             status_code=409,
             detail="Esta lección aún no tiene montaje",
@@ -83,14 +83,14 @@ def generar_previa_grabacion(
         )
     rutas = rutas_previa(config, teleprompter.guion)
     if rutas is None:
-        raise HTTPException(status_code=409, detail="La ruta de la previa no es válida")
+        raise HTTPException(status_code=404, detail="La ruta de la previa no es válida")
     temporal, destino = rutas
     try:
         destino.parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise HTTPException(
-            status_code=409,
-            detail="No se puede preparar la carpeta de la previa",
+            status_code=503,
+            detail="No se puede preparar la carpeta de la vista previa",
         ) from error
     try:
         return lanzar(

@@ -1,16 +1,28 @@
 import hashlib
 import math
+import re
 import sqlite3
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from estudio_api.config import Config
-from estudio_api.estado import camara_grabada, voz_grabada
-from estudio_api.lectura import _leer_json, datos_curso, ruta_guion
+from estudio_api.estado import camara_grabada, ruta_toma_voz
+from estudio_api.lectura import (
+    FPS_MAXIMOS,
+    FPS_MINIMOS,
+    MAX_DURACION_SEGUNDOS,
+    _leer_json,
+    _numero_finito_positivo,
+    _ruta_publica,
+    _texto,
+    datos_curso,
+)
 from estudio_api.rutas import ruta_segura
 from estudio_api.trabajos import Trabajo, ultimo_trabajo
+
+PATRON_ID_ESCENA = re.compile(r"^E\d{2}$")
 
 
 class CueTeleprompter(BaseModel):
@@ -104,10 +116,6 @@ def rutas_previa(config: Config, guion: str) -> tuple[Path, Path] | None:
     return temporal, destino
 
 
-def _texto(valor: object) -> str:
-    return valor if isinstance(valor, str) else ""
-
-
 def _lista_textos(valor: object) -> list[str]:
     if not isinstance(valor, list):
         return []
@@ -139,28 +147,6 @@ def _cues(valor: object) -> list[CueTeleprompter]:
     ]
 
 
-def _ruta_toma(
-    config: Config,
-    carpeta: Path,
-    escena: str,
-) -> tuple[Path, str] | None:
-    try:
-        relativa = carpeta.resolve().relative_to(config.cursos_dir.resolve())
-        ruta = ruta_segura(
-            config.cursos_dir,
-            *relativa.parts,
-            "grabaciones",
-            f"{escena}.wav",
-        )
-        publica = PurePosixPath(
-            "cursos",
-            *ruta.relative_to(config.cursos_dir.resolve()).parts,
-        ).as_posix()
-    except OSError, ValueError:
-        return None
-    return ruta, publica
-
-
 def _escenas_teleprompter(
     config: Config,
     curso: str,
@@ -177,20 +163,27 @@ def _escenas_teleprompter(
         if not isinstance(datos, dict) or datos.get("modo") not in {"voz", "camara"}:
             continue
         identificador = datos.get("id")
-        if not isinstance(identificador, str):
+        if (
+            not isinstance(identificador, str)
+            or PATRON_ID_ESCENA.fullmatch(identificador) is None
+        ):
             continue
         modo = datos["modo"]
         toma: str | None = None
         version_toma: int | None = None
         if modo == "voz":
-            grabada = voz_grabada(config, carpeta, identificador)
-            if grabada and (rutas := _ruta_toma(config, carpeta, identificador)):
-                ruta, toma_publica = rutas
+            ruta = ruta_toma_voz(config, carpeta, identificador)
+            grabada = ruta is not None
+            if ruta is not None:
                 try:
                     version_toma = ruta.stat().st_mtime_ns
-                    toma = toma_publica
+                    toma = _ruta_publica(config.cursos_dir, "cursos", ruta)
                 except OSError:
                     grabada = False
+                    version_toma = None
+                except ValueError:
+                    grabada = False
+                    version_toma = None
         else:
             grabada = camara_grabada(
                 config,
@@ -214,8 +207,16 @@ def _escenas_teleprompter(
     return escenas
 
 
-def _entero_no_negativo(valor: object) -> int | None:
+def _fotogramas_no_negativos(
+    valor: object,
+    fps: float,
+    *,
+    maximo: int | None = None,
+) -> int | None:
     if not isinstance(valor, int) or isinstance(valor, bool) or valor < 0:
+        return None
+    limite = int(MAX_DURACION_SEGUNDOS * fps) if maximo is None else maximo
+    if valor > limite:
         return None
     return valor
 
@@ -229,13 +230,16 @@ def _leer_montaje(
     datos = _leer_json(ruta)
     if datos is None:
         return None
-    fps = datos.get("fps")
-    if not isinstance(fps, (int, float)) or isinstance(fps, bool):
+    fps = _numero_finito_positivo(
+        datos.get("fps"),
+        minimo=FPS_MINIMOS,
+        maximo=FPS_MAXIMOS,
+    )
+    if fps is None:
         return None
-    fps = float(fps)
-    duracion_total = _entero_no_negativo(datos.get("duracion"))
+    duracion_total = _fotogramas_no_negativos(datos.get("duracion"), fps)
     datos_escenas = datos.get("escenas")
-    if not math.isfinite(fps) or fps <= 0 or duracion_total is None:
+    if duracion_total is None:
         return None
     if not isinstance(datos_escenas, list):
         return None
@@ -253,9 +257,11 @@ def _leer_montaje(
         if not isinstance(datos_escena, dict):
             return None
         identificador = datos_escena.get("id")
-        duracion = _entero_no_negativo(datos_escena.get("duracion"))
+        if not isinstance(identificador, str):
+            return None
+        duracion = _fotogramas_no_negativos(datos_escena.get("duracion"), fps)
         modo = modos.get(identificador)
-        if not isinstance(identificador, str) or duracion is None or modo is None:
+        if duracion is None or modo is None:
             return None
         datos_cues = datos_escena.get("cues", [])
         if not isinstance(datos_cues, list):
@@ -267,7 +273,7 @@ def _leer_montaje(
             desde = cue.get("desde", 0)
             if desde is None:
                 desde = 0
-            desde_entero = _entero_no_negativo(desde)
+            desde_entero = _fotogramas_no_negativos(desde, fps, maximo=duracion)
             if desde_entero is None:
                 return None
             cues.append(desde_entero)
@@ -281,6 +287,8 @@ def _leer_montaje(
             )
         )
         inicio += duracion
+        if inicio > int(MAX_DURACION_SEGUNDOS * fps):
+            return None
     return Montaje(fps=fps, duracion=duracion_total, escenas=escenas)
 
 
@@ -330,16 +338,9 @@ def leer_teleprompter(
     datos_guion = leido[2].get(numero)
     if datos_guion is None:
         return None
-    _, carpeta, guion = datos_guion
-    ruta_archivo_guion = ruta_guion(config, curso, numero, leido)
-    if ruta_archivo_guion is None:
-        return None
-    try:
-        bytes_guion = ruta_archivo_guion.read_bytes()
-    except OSError:
-        return None
+    _, carpeta, guion, ruta_archivo_guion, bytes_guion = datos_guion
 
-    identificador_guion = f"{curso}-{numero:02d}"
+    identificador_guion = ruta_archivo_guion.stem
     montaje_ruta = ruta_montaje(config, identificador_guion)
     return Teleprompter(
         curso=curso,

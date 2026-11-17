@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -189,6 +190,117 @@ def test_montaje_roto_se_devuelve_como_null(teleprompter):
     assert respuesta.json()["montaje"] is None
 
 
+@pytest.mark.parametrize(
+    "montaje",
+    [
+        {
+            "fps": 30,
+            "duracion": 1,
+            "escenas": [{"id": [], "duracion": 1}],
+        },
+        {"fps": 10**400, "duracion": 1, "escenas": []},
+        {"fps": float("nan"), "duracion": 1, "escenas": []},
+        {"fps": 30, "duracion": 10**400, "escenas": []},
+        {
+            "fps": 30,
+            "duracion": 1,
+            "escenas": [{"id": "E01", "duracion": 1, "cues": {}}],
+        },
+        {
+            "fps": 30,
+            "duracion": 1,
+            "escenas": [{"id": "E01", "duracion": 1, "cues": [{"desde": []}]}],
+        },
+    ],
+)
+def test_montaje_con_estructura_danada_no_provoca_500_en_get_ni_post(
+    teleprompter, montaje
+):
+    _, cliente, _, _, ruta_montaje, _ = teleprompter
+    ruta_montaje.write_text(json.dumps(montaje), encoding="utf-8")
+
+    respuesta_get = cliente.get(RUTA_TELEPROMPTER)
+    respuesta_post = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+
+    assert respuesta_get.status_code == 200
+    assert respuesta_get.json()["montaje"] is None
+    assert respuesta_post.status_code == 409
+    assert respuesta_post.json()["detail"] == "Esta lección aún no tiene montaje"
+
+
+def test_get_usa_el_nombre_real_del_unico_guion_de_tres_digitos(teleprompter):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta_dos_digitos = config.estudio_dir / "lecciones" / "react-04.json"
+    ruta_tres_digitos = config.estudio_dir / "lecciones" / "react-004.json"
+    ruta_dos_digitos.replace(ruta_tres_digitos)
+
+    respuesta = cliente.get(RUTA_TELEPROMPTER)
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["guion"] == "react-004"
+
+
+def test_textos_y_version_salen_del_mismo_guion_elegido(teleprompter):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta_tres_digitos = config.estudio_dir / "lecciones" / "react-004.json"
+    guion = json.loads(
+        (config.estudio_dir / "lecciones" / "react-04.json").read_text(encoding="utf-8")
+    )
+    guion["titulo"] = "Versión de tres dígitos"
+    guion["escenas"][0]["cues"] = [{"texto": "Texto del archivo elegido."}]
+    bytes_tres_digitos = json.dumps(guion, ensure_ascii=False).encode("utf-8")
+    ruta_tres_digitos.write_bytes(bytes_tres_digitos)
+
+    respuesta = cliente.get(RUTA_TELEPROMPTER)
+
+    assert respuesta.status_code == 200
+    datos = respuesta.json()
+    assert datos["guion"] == "react-004"
+    assert datos["titulo"] == "Versión de tres dígitos"
+    assert datos["escenas"][0]["cues"][0]["texto"] == "Texto del archivo elegido."
+    assert datos["version"] == hashlib.sha256(bytes_tres_digitos).hexdigest()
+
+
+def test_get_lee_los_bytes_del_guion_una_sola_vez(teleprompter, monkeypatch):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta_guion = config.estudio_dir / "lecciones" / "react-04.json"
+    open_real = Path.open
+    lecturas = 0
+
+    def abrir_contando(ruta, *args, **kwargs):
+        nonlocal lecturas
+        if ruta == ruta_guion:
+            lecturas += 1
+        return open_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", abrir_contando)
+
+    assert cliente.get(RUTA_TELEPROMPTER).status_code == 200
+    assert lecturas == 1
+
+
+def test_get_filtra_ids_de_escena_fuera_del_patron(teleprompter):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta_guion = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta_guion.read_text(encoding="utf-8"))
+    guion["escenas"].extend(
+        [
+            {"id": "intro", "modo": "voz", "cues": [{"texto": "No sale."}]},
+            {"id": "E123", "modo": "camara", "cues": []},
+        ]
+    )
+    ruta_guion.write_text(json.dumps(guion), encoding="utf-8")
+
+    respuesta = cliente.get(RUTA_TELEPROMPTER)
+
+    assert respuesta.status_code == 200
+    assert [escena["id"] for escena in respuesta.json()["escenas"]] == [
+        "E01",
+        "E03",
+        "E04",
+    ]
+
+
 def test_previa_de_grabacion_se_sirve_con_range(teleprompter):
     _, cliente, _, _, _, _ = teleprompter
 
@@ -233,7 +345,8 @@ def test_post_lanza_el_trabajo_y_coloca_la_previa(teleprompter, monkeypatch):
 
 
 def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):
-    _, cliente, _, _, _, _ = teleprompter
+    config, cliente, _, _, _, _ = teleprompter
+    continuar = config.estudio_dir / "continuar-render"
     monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
 
     def comando_lento(_npx, temporal, _guion):
@@ -241,21 +354,28 @@ def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):
             sys.executable,
             "-c",
             (
-                "import pathlib,sys,time; time.sleep(.4); "
-                "pathlib.Path(sys.argv[1]).write_bytes(b'video')"
+                "import pathlib,sys,time; "
+                "continuar=pathlib.Path(sys.argv[1]); "
+                "salida=pathlib.Path(sys.argv[2]); "
+                "\nwhile not continuar.exists(): time.sleep(.01)\n"
+                "salida.write_bytes(b'video')"
             ),
+            str(continuar),
             str(temporal),
         ]
 
     monkeypatch.setattr("estudio_api.rutas_teleprompter.comando_previa", comando_lento)
     primero = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+    try:
+        segundo = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
-    segundo = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
-
-    assert primero.status_code == 202
-    assert segundo.status_code == 409
-    assert segundo.json()["detail"] == "Ya hay un trabajo en marcha"
-    esperar(primero.json()["id"], 5)
+        assert primero.status_code == 202
+        assert segundo.status_code == 409
+        assert segundo.json()["detail"] == "Ya hay un trabajo en marcha"
+    finally:
+        continuar.touch()
+        if primero.status_code == 202:
+            esperar(primero.json()["id"], 5)
 
 
 def test_post_sin_npx_devuelve_503(teleprompter, monkeypatch):
@@ -279,6 +399,36 @@ def test_post_sin_montaje_devuelve_409(teleprompter, monkeypatch):
     assert respuesta.json()["detail"] == "Esta lección aún no tiene montaje"
 
 
+def test_post_con_ruta_de_previa_invalida_devuelve_404(teleprompter, monkeypatch):
+    _, cliente, _, _, _, _ = teleprompter
+    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.rutas_teleprompter.rutas_previa", lambda *_: None)
+
+    respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+
+    assert respuesta.status_code == 404
+
+
+def test_post_si_no_puede_preparar_la_carpeta_devuelve_503(teleprompter, monkeypatch):
+    _, cliente, _, _, _, _ = teleprompter
+    mkdir_real = Path.mkdir
+
+    def mkdir_con_fallo(ruta, *args, **kwargs):
+        if ruta.name == "previas-grabacion":
+            raise OSError("fallo de disco ficticio")
+        return mkdir_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr(Path, "mkdir", mkdir_con_fallo)
+
+    respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+
+    assert respuesta.status_code == 503
+    assert respuesta.json()["detail"] == (
+        "No se puede preparar la carpeta de la vista previa"
+    )
+
+
 def test_post_rechaza_cuerpo_con_campos_extra(teleprompter):
     _, cliente, _, _, _, _ = teleprompter
 
@@ -299,7 +449,7 @@ def test_post_sin_token_devuelve_401(teleprompter):
     "ruta",
     [
         "/api/cursos/react/lecciones/0/previa-grabacion",
-        "/api/cursos/%2E%2E%2Fx/lecciones/4/previa-grabacion",
+        "/api/cursos/%2E%2E/lecciones/4/previa-grabacion",
     ],
 )
 def test_post_rechaza_identificadores_invalidos_sin_error_500(teleprompter, ruta):
@@ -307,7 +457,7 @@ def test_post_rechaza_identificadores_invalidos_sin_error_500(teleprompter, ruta
 
     respuesta = cliente.post(ruta, headers=CABECERAS, json={})
 
-    assert respuesta.status_code in {404, 422}
+    assert respuesta.status_code == 422
 
 
 def test_get_teleprompter_y_trabajo_inexistentes_devuelven_404(teleprompter):

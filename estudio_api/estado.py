@@ -75,14 +75,22 @@ def _escenas(guion: dict[str, Any] | None, modo: str) -> list[str | None]:
     ]
 
 
-def voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> bool:
+def ruta_toma_voz(
+    config: Config,
+    carpeta: Path | None,
+    escena: str | None,
+) -> Path | None:
     if escena is None:
-        return False
+        return None
     try:
         ruta = _ruta_de_leccion(config, carpeta, "grabaciones", f"{escena}.wav")
     except ValueError:
-        return False
-    return _es_archivo(ruta)
+        return None
+    return ruta if _es_archivo(ruta) else None
+
+
+def voz_grabada(config: Config, carpeta: Path | None, escena: str | None) -> bool:
+    return ruta_toma_voz(config, carpeta, escena) is not None
 
 
 def camara_grabada(

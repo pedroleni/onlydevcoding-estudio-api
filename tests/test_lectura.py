@@ -76,7 +76,7 @@ def test_error_al_decodificar_json_se_ignora(tmp_path, monkeypatch, error):
     def fallar(_archivo):
         raise error
 
-    monkeypatch.setattr("estudio_api.lectura.json.load", fallar)
+    monkeypatch.setattr("estudio_api.lectura.json.loads", fallar)
 
     assert _leer_json(ruta) is None
 

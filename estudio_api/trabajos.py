@@ -6,10 +6,10 @@ import re
 import sqlite3
 import subprocess
 import threading
-import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 from pydantic import BaseModel
@@ -128,6 +128,40 @@ def _finalizar(
         )
 
 
+def _finalizar_con_reintento(
+    bd_ruta: Path,
+    trabajo_id: int,
+    estado: Literal["hecho", "error"],
+    progreso: float,
+    registro: list[str],
+    error: str | None,
+) -> bool:
+    for intento in range(2):
+        try:
+            _finalizar(
+                bd_ruta,
+                trabajo_id,
+                estado,
+                progreso,
+                registro,
+                error,
+            )
+            return True
+        except Exception:
+            if intento == 0:
+                logger.warning(
+                    "No se pudo finalizar el trabajo %s; se reintentará",
+                    trabajo_id,
+                    exc_info=True,
+                )
+            else:
+                logger.exception(
+                    "No se pudo finalizar el trabajo %s tras reintentarlo",
+                    trabajo_id,
+                )
+    return False
+
+
 def _borrar_temporal(temporal: Path | None) -> None:
     if temporal is not None:
         temporal.unlink(missing_ok=True)
@@ -178,7 +212,7 @@ def _ejecutar(
             )
         except OSError as exc:
             _borrar_temporal(temporal)
-            _finalizar(
+            _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
@@ -191,13 +225,14 @@ def _ejecutar(
         assert proceso.stdout is not None
         pendiente = ""
         reescribir_pendiente = False
-        ultima_escritura = time.monotonic()
+        ultima_escritura = monotonic()
         decodificador = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def incorporar_texto(texto: str) -> None:
             nonlocal pendiente, progreso, reescribir_pendiente
             for caracter in texto:
                 if caracter == "\r":
+                    tenia_pendiente = bool(pendiente)
                     progreso = _incorporar_linea(
                         pendiente,
                         registro,
@@ -205,7 +240,7 @@ def _ejecutar(
                         reescribir=reescribir_pendiente,
                     )
                     pendiente = ""
-                    reescribir_pendiente = True
+                    reescribir_pendiente = reescribir_pendiente or tenia_pendiente
                 elif caracter == "\n":
                     progreso = _incorporar_linea(
                         pendiente,
@@ -221,7 +256,7 @@ def _ejecutar(
         try:
             while trozo := proceso.stdout.read1(4096):
                 incorporar_texto(decodificador.decode(trozo))
-                ahora = time.monotonic()
+                ahora = monotonic()
                 if ahora - ultima_escritura >= 1:
                     try:
                         _guardar_avance(bd_ruta, trabajo_id, progreso, registro)
@@ -246,7 +281,7 @@ def _ejecutar(
         codigo = proceso.wait()
         if codigo != 0:
             _borrar_temporal(temporal)
-            _finalizar(
+            _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
@@ -258,7 +293,14 @@ def _ejecutar(
 
         if temporal is not None and destino is not None:
             os.replace(temporal, destino)
-        _finalizar(bd_ruta, trabajo_id, "hecho", progreso, registro, None)
+        _finalizar_con_reintento(
+            bd_ruta,
+            trabajo_id,
+            "hecho",
+            progreso,
+            registro,
+            None,
+        )
     except Exception as exc:
         if proceso is not None and proceso.poll() is None:
             proceso.kill()
@@ -268,7 +310,7 @@ def _ejecutar(
         except OSError:
             logger.exception("No se pudo borrar el temporal del trabajo %s", trabajo_id)
         logger.exception("Fallo inesperado en el trabajo %s", trabajo_id)
-        _finalizar(
+        _finalizar_con_reintento(
             bd_ruta,
             trabajo_id,
             "error",
@@ -315,10 +357,23 @@ def lanzar(
         bd.isolation_level = None
         try:
             bd.execute("BEGIN IMMEDIATE")
-            if bd.execute(
-                "SELECT 1 FROM trabajo WHERE estado = 'en_marcha' LIMIT 1"
-            ).fetchone():
+            en_marcha = bd.execute(
+                "SELECT id FROM trabajo WHERE estado = 'en_marcha'"
+            ).fetchall()
+            if any(
+                (hilo := _HILOS.get(fila[0])) is not None and hilo.is_alive()
+                for fila in en_marcha
+            ):
                 raise TrabajoEnMarcha
+            if en_marcha:
+                bd.executemany(
+                    """
+                    UPDATE trabajo
+                    SET estado = 'interrumpido', fin = ?
+                    WHERE id = ? AND estado = 'en_marcha'
+                    """,
+                    [(_ahora(), fila[0]) for fila in en_marcha],
+                )
             cursor = bd.execute(
                 """
                 INSERT INTO trabajo
@@ -370,7 +425,7 @@ def lanzar(
                     "No se pudo borrar el temporal del trabajo %s",
                     trabajo_id,
                 )
-            _finalizar(
+            _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
