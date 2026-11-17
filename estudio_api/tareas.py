@@ -1,5 +1,6 @@
 import re
 import sqlite3
+from contextlib import nullcontext
 from datetime import date, datetime
 from typing import Literal, Self
 
@@ -301,7 +302,8 @@ def completar_tareas_de_red(
     red: str,
 ) -> int:
     hecha_en = datetime.now().replace(microsecond=0).isoformat()
-    with bd:
+    contexto_transaccion = nullcontext() if bd.in_transaction else bd
+    with contexto_transaccion:
         cursor = bd.execute(
             """
             UPDATE tarea

@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from contextlib import nullcontext
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -191,7 +192,8 @@ def fijar_estado(
     red: str,
     estado: EstadoRed,
 ) -> None:
-    with bd:
+    contexto_transaccion = nullcontext() if bd.in_transaction else bd
+    with contexto_transaccion:
         if estado.estado == "pendiente":
             bd.execute(
                 """

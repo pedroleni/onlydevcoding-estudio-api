@@ -4,10 +4,13 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
+from estudio_api.decisiones import abrir_bd
+from estudio_api.tareas import TareaNueva, crear_tarea
 from tests.ayudas import TOKEN
 
 RUTA_PUBLICACION = "/api/cursos/react/lecciones/4/publicacion"
@@ -74,6 +77,29 @@ def _instalar_script_html(cfg, contenido=None):
         encoding="utf-8",
     )
     return script
+
+
+def _crear_tarea(cfg, *, texto="Tarea ficticia", enlace=None):
+    with closing(abrir_bd(cfg.bd_ruta)) as bd:
+        return crear_tarea(
+            bd,
+            TareaNueva.model_validate(
+                {
+                    "fecha": "2026-11-17",
+                    "hora": None,
+                    "texto": texto,
+                    "tipo": "publicar",
+                    "enlace": enlace,
+                }
+            ),
+        )
+
+
+def _estado_tarea(cfg, tarea_id):
+    with closing(abrir_bd(cfg.bd_ruta)) as bd:
+        return bd.execute(
+            "SELECT hecha, hecha_en FROM tarea WHERE id = ?", (tarea_id,)
+        ).fetchone()
 
 
 def test_get_sin_json_une_las_piezas_del_disco_y_ordena_las_redes(cliente):
@@ -272,6 +298,135 @@ def test_marcar_youtube_publicado_actualiza_detalle_y_lista(cliente_con_token):
     lista = cliente_con_token.get("/api/cursos/react/lecciones").json()
     leccion = next(elemento for elemento in lista if elemento["numero"] == 4)
     assert leccion["estado"]["publicado"]["youtube"] is True
+
+
+def test_publicar_completa_solo_las_tareas_enlazadas_a_esa_red(cliente_con_token, cfg):
+    tarea_de_red = _crear_tarea(
+        cfg,
+        texto="Publicar pieza ficticia",
+        enlace={
+            "curso": "react",
+            "numero": 4,
+            "pieza": "leccion",
+            "red": "youtube",
+        },
+    )
+    tarea_de_leccion = _crear_tarea(
+        cfg,
+        texto="Revisar lección ficticia",
+        enlace={"curso": "react", "numero": 4},
+    )
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/estado",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "publicado"},
+    )
+
+    assert respuesta.status_code == 200
+    hecha, hecha_en = _estado_tarea(cfg, tarea_de_red.id)
+    assert hecha == 1
+    assert hecha_en is not None
+    assert _estado_tarea(cfg, tarea_de_leccion.id) == (0, None)
+
+
+def test_programar_no_completa_y_volver_a_pendiente_no_reabre(cliente_con_token, cfg):
+    tarea = _crear_tarea(
+        cfg,
+        enlace={
+            "curso": "react",
+            "numero": 4,
+            "pieza": "leccion",
+            "red": "youtube",
+        },
+    )
+    ruta = f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/estado"
+
+    programada = cliente_con_token.put(
+        ruta,
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "programado", "fecha": "2026-11-18T20:00:00+01:00"},
+    )
+    assert programada.status_code == 200
+    assert _estado_tarea(cfg, tarea.id) == (0, None)
+
+    publicada = cliente_con_token.put(
+        ruta,
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "publicado"},
+    )
+    assert publicada.status_code == 200
+    estado_publicada = _estado_tarea(cfg, tarea.id)
+    assert estado_publicada[0] == 1
+
+    pendiente = cliente_con_token.put(
+        ruta,
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "pendiente"},
+    )
+    assert pendiente.status_code == 200
+    assert _estado_tarea(cfg, tarea.id) == estado_publicada
+
+
+def test_volver_a_guardar_publicado_completa_nuevas_tareas_pendientes(
+    cliente_con_token, cfg
+):
+    ruta = f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/estado"
+    primera = cliente_con_token.put(
+        ruta,
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "publicado"},
+    )
+    assert primera.status_code == 200
+    tarea = _crear_tarea(
+        cfg,
+        enlace={
+            "curso": "react",
+            "numero": 4,
+            "pieza": "leccion",
+            "red": "youtube",
+        },
+    )
+
+    segunda = cliente_con_token.put(
+        ruta,
+        headers={"X-Estudio-Token": TOKEN},
+        json={"estado": "publicado", "url": "https://youtu.be/video-ficticio"},
+    )
+
+    assert segunda.status_code == 200
+    hecha, hecha_en = _estado_tarea(cfg, tarea.id)
+    assert hecha == 1
+    assert hecha_en is not None
+
+
+def test_fallo_al_completar_tareas_revierte_el_estado(
+    cliente_con_token, cfg, monkeypatch
+):
+    def fallar_al_completar(*_args, **_kwargs):
+        raise RuntimeError("fallo ficticio al completar")
+
+    monkeypatch.setattr(
+        "estudio_api.rutas_publicar.completar_tareas_de_red",
+        fallar_al_completar,
+    )
+
+    with pytest.raises(RuntimeError, match="fallo ficticio al completar"):
+        cliente_con_token.put(
+            f"{RUTA_PUBLICACION}/piezas/leccion/redes/youtube/estado",
+            headers={"X-Estudio-Token": TOKEN},
+            json={"estado": "publicado"},
+        )
+
+    with closing(abrir_bd(cfg.bd_ruta)) as bd:
+        estado = bd.execute(
+            """
+            SELECT estado FROM estado_red
+            WHERE curso = ? AND numero = ? AND pieza = ? AND red = ?
+            """,
+            ("react", 4, "leccion", "youtube"),
+        ).fetchone()
+    assert estado is None
 
 
 def test_reel_previsto_en_instagram_pendiente_mantiene_la_red_falsa(

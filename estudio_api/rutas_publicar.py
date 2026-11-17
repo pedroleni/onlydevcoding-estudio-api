@@ -39,6 +39,7 @@ from estudio_api.publicacion import (
     validar_textos,
 )
 from estudio_api.rutas_api import CursoId, NumeroLeccion
+from estudio_api.tareas import completar_tareas_de_red
 from estudio_api.vista_publicacion import VistaPublicacion, construir_vista_publicacion
 
 router = APIRouter(prefix="/api")
@@ -198,8 +199,12 @@ def cambiar_estado(
             return Response(status_code=404)
         if all(elemento.id != pieza for elemento in vista.piezas):
             return Response(status_code=404)
-        fijar_estado(bd, curso, numero, pieza, red, nuevo_estado)
-        resultado = construir_vista_publicacion(config, curso, numero, bd)
+        with bd:
+            bd.execute("BEGIN IMMEDIATE")
+            fijar_estado(bd, curso, numero, pieza, red, nuevo_estado)
+            if nuevo_estado.estado == "publicado":
+                completar_tareas_de_red(bd, curso, numero, pieza, red)
+            resultado = construir_vista_publicacion(config, curso, numero, bd)
     assert resultado is not None
     return resultado
 
