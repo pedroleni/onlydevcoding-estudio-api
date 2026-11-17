@@ -4,6 +4,7 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import BaseModel, ConfigDict
+from starlette.requests import ClientDisconnect
 from starlette.responses import Response
 
 from estudio_api.config import Config
@@ -72,7 +73,8 @@ async def subir_toma_voz(
     numero: NumeroLeccion,
     escena: EscenaId,
 ) -> TomaGuardada:
-    if request.headers.get("content-type") != "audio/wav":
+    tipo_medio = request.headers.get("content-type", "").partition(";")[0]
+    if tipo_medio.strip().casefold() != "audio/wav":
         raise HTTPException(
             status_code=415,
             detail="La toma tiene que ser un WAV (audio/wav)",
@@ -107,6 +109,11 @@ async def subir_toma_voz(
             status_code=422,
             detail="El archivo no es un WAV válido",
         ) from error
+    except ClientDisconnect:
+        raise HTTPException(
+            status_code=400,
+            detail="La subida se ha cortado",
+        ) from None
     except (OSError, ValueError) as error:
         raise HTTPException(
             status_code=503,

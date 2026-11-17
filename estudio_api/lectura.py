@@ -215,22 +215,8 @@ def _datos_curso(
         None,
     )
     if encontrado is None:
-        carpeta_curso = next(
-            (
-                carpeta
-                for carpeta in _entradas_seguras(
-                    config.cursos_dir,
-                    config.cursos_dir.resolve(),
-                )
-                if carpeta.is_dir() and carpeta.name.lower() == curso
-            ),
-            None,
-        )
-        if carpeta_curso is None:
-            return None
-        carpetas = _carpetas_leccion(config.cursos_dir, carpeta_curso)
-    else:
-        _, carpeta_curso, carpetas = encontrado
+        return None
+    _, carpeta_curso, carpetas = encontrado
     guiones = _guiones_curso(config, curso, carpeta_curso.name)
     return carpeta_curso, carpetas, guiones
 
