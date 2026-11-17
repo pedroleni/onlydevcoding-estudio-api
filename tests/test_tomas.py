@@ -535,7 +535,10 @@ def test_un_fsync_fallido_no_cierra_dos_veces_el_descriptor(tomas, monkeypatch):
             )
         )
 
-    assert len(cierres) == 1
+    # El parche de os.close es global: en Linux asyncio también cierra
+    # descriptores propios. Lo que importa es que ninguno se cierre dos veces.
+    assert cierres
+    assert len(cierres) == len(set(cierres))
     assert [ruta for ruta in grabaciones.iterdir() if ruta.name.startswith(".")] == []
 
 
