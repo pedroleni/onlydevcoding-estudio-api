@@ -1,4 +1,6 @@
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime
 
@@ -252,6 +254,73 @@ def test_abrir_bd_migra_v1_y_conserva_sus_filas(tmp_path):
                 "https://youtu.be/abc",
             )
         ]
+        tablas = {
+            fila[0]
+            for fila in bd.execute(
+                "SELECT name FROM sqlite_master WHERE type = ?", ("table",)
+            )
+        }
+        assert {"tipo_tarea", "curso_app", "tarea"} <= tablas
+        assert bd.execute("SELECT id FROM tipo_tarea ORDER BY orden").fetchall() == [
+            ("preparar",),
+            ("grabar",),
+            ("editar",),
+            ("publicar",),
+            ("otro",),
+        ]
+
+
+def test_dos_aperturas_simultaneas_migran_v1_una_sola_vez(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    _crear_bd_v1(ruta_bd)
+    conectar_real = sqlite3.connect
+    barrera = threading.Barrier(2)
+
+    class ConexionSincronizada(sqlite3.Connection):
+        primera_lectura_hecha = False
+
+        def execute(self, sql, parameters=(), /):
+            cursor = super().execute(sql, parameters)
+            if sql.strip() == "PRAGMA user_version" and not self.primera_lectura_hecha:
+                self.primera_lectura_hecha = True
+                barrera.wait(timeout=5)
+            return cursor
+
+    def conectar_sincronizado(ruta):
+        return conectar_real(ruta, factory=ConexionSincronizada, timeout=5)
+
+    monkeypatch.setattr("estudio_api.decisiones.sqlite3.connect", conectar_sincronizado)
+
+    def abrir_y_cerrar():
+        with closing(abrir_bd(ruta_bd)) as bd:
+            return bd.execute("PRAGMA user_version").fetchone()[0]
+
+    with ThreadPoolExecutor(max_workers=2) as ejecutor:
+        versiones = list(ejecutor.map(lambda _: abrir_y_cerrar(), range(2)))
+
+    assert versiones == [2, 2]
+    with closing(conectar_real(ruta_bd)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert bd.execute("SELECT COUNT(*) FROM tipo_tarea").fetchone()[0] == 5
+
+
+def test_abrir_bd_restaura_el_aislamiento_para_revertir_bloques(tmp_path):
+    with closing(abrir_bd(tmp_path / "estudio.sqlite3")) as bd:
+        aislamiento_original = bd.isolation_level
+
+        with pytest.raises(RuntimeError, match="fallo de prueba"), bd:
+            bd.execute(
+                "INSERT INTO portada_elegida VALUES (?, ?, ?, ?)",
+                ("curso-prueba", 1, "leccion", "primera.jpg"),
+            )
+            bd.execute(
+                "INSERT INTO portada_elegida VALUES (?, ?, ?, ?)",
+                ("curso-prueba", 2, "leccion", "segunda.jpg"),
+            )
+            raise RuntimeError("fallo de prueba")
+
+        assert bd.isolation_level == aislamiento_original
+        assert bd.execute("SELECT COUNT(*) FROM portada_elegida").fetchone()[0] == 0
 
 
 def test_fallo_de_migracion_revierte_ddl_siembra_y_version(tmp_path, monkeypatch):

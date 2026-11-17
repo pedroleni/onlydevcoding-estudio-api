@@ -1,5 +1,7 @@
+import sqlite3
 from contextlib import closing
 from datetime import date, datetime
+from threading import Event, Thread
 
 import pytest
 from pydantic import ValidationError
@@ -72,6 +74,12 @@ def test_validacion_de_fecha_hora_texto_y_campos_extra():
                 "inesperado": True,
             }
         )
+
+
+@pytest.mark.parametrize("separador", ["\v", "\x85", "\u2028", "\t", "\x00"])
+def test_texto_rechaza_saltos_unicode_y_caracteres_de_control(separador):
+    with pytest.raises(ValidationError):
+        _nueva(texto=f"Primera parte{separador}segunda parte")
 
 
 def test_validacion_jerarquica_y_patrones_del_enlace():
@@ -235,3 +243,94 @@ def test_cursos_app_no_se_borran_si_tienen_tareas(tmp_path):
         assert borrar_tarea(bd, tarea.id) is True
         assert borrar_curso_app(bd, "python") == "borrado"
         assert borrar_curso_app(bd, "python") == "no_existe"
+
+
+@pytest.mark.parametrize(
+    ("objetivo", "consulta_dependencia"),
+    [
+        ("tipo", "SELECT 1 FROM tarea WHERE tipo"),
+        ("curso", "SELECT 1 FROM tarea WHERE curso"),
+    ],
+)
+def test_comprobar_y_borrar_es_atomico_frente_a_otra_escritura(
+    tmp_path, objetivo, consulta_dependencia
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    with closing(abrir_bd(ruta_bd)) as bd:
+        crear_curso_app(bd, CursoApp(id="python", nombre="Python"))
+
+    consulta_alcanzada = Event()
+    escritor_terminado = Event()
+    error_borrado = []
+    error_escritura = []
+    resultado = []
+
+    class ConexionPausada(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            cursor = super().execute(sql, parameters)
+            if consulta_dependencia in " ".join(sql.split()):
+                consulta_alcanzada.set()
+                assert escritor_terminado.wait(timeout=5)
+            return cursor
+
+    def borrar():
+        try:
+            with closing(
+                sqlite3.connect(ruta_bd, factory=ConexionPausada, timeout=1)
+            ) as bd:
+                bd.execute("PRAGMA foreign_keys = ON")
+                funcion = borrar_tipo if objetivo == "tipo" else borrar_curso_app
+                identificador = "preparar" if objetivo == "tipo" else "python"
+                resultado.append(funcion(bd, identificador))
+        except Exception as error:  # noqa: BLE001 - el hilo devuelve el fallo al test.
+            error_borrado.append(error)
+
+    def escribir():
+        assert consulta_alcanzada.wait(timeout=5)
+        try:
+            with closing(sqlite3.connect(ruta_bd, timeout=0.2)) as bd:
+                bd.execute("PRAGMA foreign_keys = ON")
+                bd.execute(
+                    """
+                    INSERT INTO tarea (fecha, texto, tipo, curso)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        "2026-11-17",
+                        "Escritura concurrente ficticia",
+                        "preparar",
+                        "python" if objetivo == "curso" else None,
+                    ),
+                )
+                bd.commit()
+        except sqlite3.OperationalError as error:
+            error_escritura.append(error)
+        finally:
+            escritor_terminado.set()
+
+    hilo_borrado = Thread(target=borrar)
+    hilo_escritura = Thread(target=escribir)
+    hilo_borrado.start()
+    hilo_escritura.start()
+    hilo_borrado.join(timeout=5)
+    hilo_escritura.join(timeout=5)
+
+    assert not hilo_borrado.is_alive()
+    assert not hilo_escritura.is_alive()
+    assert not error_borrado
+    assert resultado in (["borrado"], ["en_uso"])
+    with closing(sqlite3.connect(ruta_bd)) as bd:
+        tareas = bd.execute("SELECT COUNT(*) FROM tarea").fetchone()[0]
+        tabla = "tipo_tarea" if objetivo == "tipo" else "curso_app"
+        identificador = "preparar" if objetivo == "tipo" else "python"
+        existe = bd.execute(
+            f"SELECT 1 FROM {tabla} WHERE id = ?", (identificador,)
+        ).fetchone()
+
+    if resultado == ["borrado"]:
+        assert tareas == 0
+        assert existe is None
+    else:
+        assert tareas == 1
+        assert existe is not None
+    assert len(error_escritura) <= 1

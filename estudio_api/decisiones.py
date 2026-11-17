@@ -125,7 +125,15 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
         aislamiento_anterior = bd.isolation_level
         bd.isolation_level = None
         try:
-            bd.execute("BEGIN")
+            bd.execute("BEGIN IMMEDIATE")
+            version = bd.execute("PRAGMA user_version").fetchone()[0]
+            if version == 2:
+                bd.execute("COMMIT")
+                return bd
+            if version not in (0, 1):
+                raise RuntimeError(
+                    f"Versión de la base de datos no soportada: {version}"
+                )
             if version == 0:
                 _crear_tablas_fase_2(bd)
             _crear_tablas_tareas(bd)

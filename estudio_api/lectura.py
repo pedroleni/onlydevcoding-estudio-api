@@ -18,6 +18,7 @@ from estudio_api.modelos import (
     Pieza,
 )
 from estudio_api.rutas import ruta_segura
+from estudio_api.tareas import cursos_app
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_CARPETA_LECCION = re.compile(r"^(\d{2,3})-(.+)$")
@@ -103,6 +104,18 @@ def _cursos_en_disco(
         if lecciones:
             cursos.append((identificador, carpeta, lecciones))
     return sorted(cursos, key=lambda curso: curso[0])
+
+
+def curso_en_disco(config: Config, curso: str) -> bool:
+    if PATRON_ID_CURSO.fullmatch(curso) is None:
+        return False
+    return any(
+        carpeta.is_dir() and carpeta.name.lower() == curso
+        for carpeta in _entradas_seguras(
+            config.cursos_dir,
+            config.cursos_dir.resolve(),
+        )
+    )
 
 
 def _carpeta_desde_guion(
@@ -202,21 +215,62 @@ def _titulo_desde_slug(slug: str) -> str:
     return slug.replace("-", " ").capitalize()
 
 
-def leer_cursos(config: Config) -> list[Curso]:
-    cursos: list[Curso] = []
+def leer_cursos(
+    config: Config,
+    bd: sqlite3.Connection | None = None,
+) -> list[Curso]:
+    cursos_disco: list[Curso] = []
     for identificador, carpeta, carpetas in _cursos_en_disco(config):
         guiones = _guiones_curso(config, identificador, carpeta.name)
         primer_guion = guiones[min(guiones)][2] if guiones else None
         nombre = _texto(primer_guion.get("ficha")) if primer_guion else ""
-        cursos.append(
+        cursos_disco.append(
             Curso(
                 id=identificador,
                 nombre=nombre or carpeta.name,
                 carpeta=_ruta_publica(config.cursos_dir, "cursos", carpeta),
                 lecciones=len(set(carpetas) | set(guiones)),
+                en_disco=True,
             )
         )
-    return cursos
+    if bd is None:
+        return cursos_disco
+
+    cursos_registrados = cursos_app(bd)
+    ids_disco = {curso.id for curso in cursos_disco}
+    entradas_raiz = {
+        ruta.name.lower(): ruta
+        for ruta in _entradas_seguras(config.cursos_dir, config.cursos_dir.resolve())
+        if ruta.is_dir() and PATRON_ID_CURSO.fullmatch(ruta.name.lower()) is not None
+    }
+    cursos_solo_app: list[Curso] = []
+    for registrado in cursos_registrados:
+        if registrado.id in ids_disco:
+            continue
+        carpeta = entradas_raiz.get(registrado.id)
+        if carpeta is not None:
+            cursos_disco.append(
+                Curso(
+                    id=registrado.id,
+                    nombre=registrado.nombre,
+                    carpeta=_ruta_publica(config.cursos_dir, "cursos", carpeta),
+                    lecciones=0,
+                    en_disco=True,
+                )
+            )
+            ids_disco.add(registrado.id)
+            continue
+        cursos_solo_app.append(
+            Curso(
+                id=registrado.id,
+                nombre=registrado.nombre,
+                carpeta=None,
+                lecciones=0,
+                en_disco=False,
+            )
+        )
+    cursos_disco.sort(key=lambda curso: curso.id)
+    return [*cursos_disco, *cursos_solo_app]
 
 
 def leer_lecciones(

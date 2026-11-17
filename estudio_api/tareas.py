@@ -90,7 +90,9 @@ class TareaNueva(_ModeloEstricto):
         recortado = valor.strip()
         if not 1 <= len(recortado) <= 300:
             raise ValueError("El texto debe tener entre 1 y 300 caracteres")
-        if "\n" in recortado or "\r" in recortado:
+        if len(recortado.splitlines()) != 1 or any(
+            ord(caracter) < 0x20 or ord(caracter) == 0x7F for caracter in recortado
+        ):
             raise ValueError("El texto no puede contener saltos de línea")
         return recortado
 
@@ -344,15 +346,22 @@ def editar_tipo(bd: sqlite3.Connection, id: str, tipo: TipoTarea) -> TipoTarea |
 
 
 def borrar_tipo(bd: sqlite3.Connection, id: str) -> ResultadoBorrado:
-    with bd:
+    bd.execute("BEGIN IMMEDIATE")
+    try:
         if (
             bd.execute("SELECT 1 FROM tipo_tarea WHERE id = ?", (id,)).fetchone()
             is None
         ):
+            bd.commit()
             return "no_existe"
         if bd.execute("SELECT 1 FROM tarea WHERE tipo = ? LIMIT 1", (id,)).fetchone():
+            bd.commit()
             return "en_uso"
         bd.execute("DELETE FROM tipo_tarea WHERE id = ?", (id,))
+        bd.commit()
+    except Exception:
+        bd.rollback()
+        raise
     return "borrado"
 
 
@@ -373,10 +382,17 @@ def crear_curso_app(bd: sqlite3.Connection, curso: CursoApp) -> CursoApp:
 
 
 def borrar_curso_app(bd: sqlite3.Connection, id: str) -> ResultadoBorrado:
-    with bd:
+    bd.execute("BEGIN IMMEDIATE")
+    try:
         if bd.execute("SELECT 1 FROM curso_app WHERE id = ?", (id,)).fetchone() is None:
+            bd.commit()
             return "no_existe"
         if bd.execute("SELECT 1 FROM tarea WHERE curso = ? LIMIT 1", (id,)).fetchone():
+            bd.commit()
             return "en_uso"
         bd.execute("DELETE FROM curso_app WHERE id = ?", (id,))
+        bd.commit()
+    except Exception:
+        bd.rollback()
+        raise
     return "borrado"

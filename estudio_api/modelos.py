@@ -116,5 +116,6 @@ class Leccion(LeccionResumen):
 class Curso(BaseModel):
     id: str
     nombre: str
-    carpeta: str
+    carpeta: str | None
     lecciones: int
+    en_disco: bool
