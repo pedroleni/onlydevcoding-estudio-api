@@ -18,10 +18,9 @@ PATRON_ID_GUION = re.compile(r"^[a-z0-9-]{1,40}-\d{2,3}$")
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
 
 
-def publicado_por_red(
+def _piezas_previstas(
     publicacion: Publicacion | None,
-    estados: Mapping[tuple[str, str], EstadoRed],
-) -> dict[str, bool]:
+) -> dict[str, list[tuple[str, str]]]:
     previstas: dict[str, list[tuple[str, str]]] = {red: [] for red in REDES}
     if publicacion is None:
         previstas["youtube"].append(("leccion", "youtube"))
@@ -32,14 +31,37 @@ def publicado_por_red(
             for red, textos in datos.redes.items():
                 if not textos_red_vacios(textos):
                     previstas[red].append((pieza, red))
+    return previstas
 
+
+def _publicada(
+    estados: Mapping[tuple[str, str], EstadoRed], par: tuple[str, str]
+) -> bool:
+    estado = estados.get(par)
+    return estado is not None and estado.estado == "publicado"
+
+
+def publicado_por_red(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, bool]:
     return {
-        red: bool(pares)
-        and all(
-            estados.get(par) is not None and estados[par].estado == "publicado"
-            for par in pares
+        red: bool(pares) and all(_publicada(estados, par) for par in pares)
+        for red, pares in _piezas_previstas(publicacion).items()
+    }
+
+
+def avance_por_red(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, Avance]:
+    """Piezas publicadas de las previstas en cada red (las que tienen textos)."""
+    return {
+        red: Avance(
+            hechas=sum(_publicada(estados, par) for par in pares),
+            total=len(pares),
         )
-        for red, pares in previstas.items()
+        for red, pares in _piezas_previstas(publicacion).items()
     }
 
 
@@ -237,4 +259,5 @@ def calcular_estado(
         miniatura=miniatura,
         previa=_ultima_previa(config, carpeta),
         publicado=publicado_por_red(publicacion, estados_publicacion or {}),
+        publicado_avance=avance_por_red(publicacion, estados_publicacion or {}),
     )

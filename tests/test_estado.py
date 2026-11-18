@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from estudio_api.estado import calcular_estado, publicado_por_red
+from estudio_api.estado import avance_por_red, calcular_estado, publicado_por_red
 from estudio_api.modelos import Avance, EstadoRed
 from estudio_api.publicacion import Publicacion
 
@@ -236,3 +236,47 @@ def test_publicado_por_red_no_cuenta_redes_vacias():
     )
 
     assert resultado["tiktok"] is False
+
+
+def test_avance_por_red_cuenta_piezas_publicadas_de_las_previstas():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {"redes": {"youtube": {"descripcion": "Texto ficticio"}}},
+                "short-1": {
+                    "redes": {
+                        "youtube": {"descripcion": "Otro texto ficticio"},
+                        "instagram": {"texto": "Otro texto ficticio"},
+                    }
+                },
+                "short-2": {
+                    "redes": {"youtube": {"descripcion": "Más texto ficticio"}}
+                },
+            },
+        }
+    )
+    resultado = avance_por_red(
+        publicacion,
+        {
+            ("leccion", "youtube"): EstadoRed(estado="publicado"),
+            ("short-1", "youtube"): EstadoRed(estado="publicado"),
+            ("short-2", "youtube"): EstadoRed(
+                estado="programado", fecha="2026-01-01T10:00:00+01:00"
+            ),
+        },
+    )
+
+    assert {red: (a.hechas, a.total) for red, a in resultado.items()} == {
+        "youtube": (2, 3),
+        "instagram": (0, 1),
+        "tiktok": (0, 0),
+        "linkedin": (0, 0),
+    }
+
+
+def test_avance_por_red_sin_json_preve_solo_leccion_en_youtube():
+    resultado = avance_por_red(None, {})
+
+    assert (resultado["youtube"].hechas, resultado["youtube"].total) == (0, 1)
+    assert resultado["instagram"].total == 0

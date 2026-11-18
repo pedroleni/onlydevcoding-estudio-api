@@ -77,6 +77,7 @@ class EstadoLeccion(BaseModel):
     miniatura: str | None = None
     previa: str | None = None
     publicado: dict[str, bool] = Field(default_factory=dict)
+    publicado_avance: dict[str, Avance] = Field(default_factory=dict)
 
 
 class Escena(BaseModel):
