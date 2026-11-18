@@ -9,8 +9,8 @@ import sqlite3
 import stat
 import subprocess
 import threading
-from collections.abc import Callable, Collection, Mapping
-from contextlib import closing
+from collections.abc import Callable, Collection, Iterator, Mapping
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 _BLOQUEO = threading.Lock()
 _HILOS: dict[int, threading.Thread] = {}
+# Una operación síncrona (colocar las tomas) que ocupa el hueco de los trabajos.
+_OCUPADO_SIN_TRABAJO = False
 
 PROGRESO_REMOTION = re.compile(r"(\d+)/(\d+)")
 PROGRESO_HERRAMIENTA = re.compile(r"^PROGRESO (\d+)/(\d+)$")
@@ -419,11 +421,12 @@ def _ruta_archivada(destino: Path) -> Path:
         indice += 1
 
 
-def instalar_archivando(temporal: Path, destino: Path) -> None:
+def instalar_archivando(temporal: Path, destino: Path) -> Path | None:
+    """Instala ``temporal`` en ``destino``; devuelve dónde quedó el anterior."""
     destino_existente = _destino_actual(destino)
     if destino_existente is None:
         os.replace(temporal, destino)
-        return
+        return None
     archivado = _ruta_archivada(destino)
     os.replace(destino, archivado)
     try:
@@ -437,6 +440,7 @@ def instalar_archivando(temporal: Path, destino: Path) -> None:
                 exc_info=True,
             )
         raise
+    return archivado
 
 
 def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
@@ -777,7 +781,7 @@ def lanzar(
             en_marcha = bd.execute(
                 "SELECT id, temporal FROM trabajo WHERE estado = 'en_marcha'"
             ).fetchall()
-            if any(
+            if _OCUPADO_SIN_TRABAJO or any(
                 (hilo := _HILOS.get(fila[0])) is not None and hilo.is_alive()
                 for fila in en_marcha
             ):
@@ -855,6 +859,25 @@ def lanzar(
             assert fallido is not None
             return fallido
         return trabajo
+
+
+@contextmanager
+def ocupar_sin_trabajo() -> Iterator[None]:
+    """Ocupa el hueco de los trabajos durante una operación síncrona.
+
+    Mientras dura, ``lanzar`` responde ``TrabajoEnMarcha``; y no se puede
+    ocupar si ya hay un trabajo vivo u otra operación ocupándolo.
+    """
+    global _OCUPADO_SIN_TRABAJO
+    with _BLOQUEO:
+        if _OCUPADO_SIN_TRABAJO or any(hilo.is_alive() for hilo in _HILOS.values()):
+            raise TrabajoEnMarcha
+        _OCUPADO_SIN_TRABAJO = True
+    try:
+        yield
+    finally:
+        with _BLOQUEO:
+            _OCUPADO_SIN_TRABAJO = False
 
 
 def cancelar(bd_ruta: Path, id: int) -> Trabajo | None:

@@ -101,37 +101,40 @@ class Propuesta(BaseModel):
     archivos: list[TomaPropuesta]
 
 
-def _destinos_guion(
+def destinos_guion(
     guion: dict[str, Any],
-) -> tuple[dict[str, int], set[str]]:
-    camara: dict[str, int] = {}
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Escenas de cámara (``E\\d{2}`` con ``cues``) y ganchos del guion, por id.
+
+    Devuelve los mismos diccionarios del guion, no copias.
+    """
+    camara: dict[str, dict[str, Any]] = {}
     escenas = guion.get("escenas")
     if isinstance(escenas, list):
         for escena in escenas:
             if not isinstance(escena, dict) or escena.get("modo") != "camara":
                 continue
             identificador = escena.get("id")
-            cues = escena.get("cues")
             if (
                 isinstance(identificador, str)
                 and PATRON_ESCENA_CAMARA.fullmatch(identificador) is not None
-                and isinstance(cues, list)
+                and isinstance(escena.get("cues"), list)
             ):
-                camara[identificador] = len(cues)
-    ganchos: set[str] = set()
+                camara[identificador] = escena
+    ganchos: dict[str, dict[str, Any]] = {}
     datos_ganchos = guion.get("ganchos")
     if isinstance(datos_ganchos, list):
         for gancho in datos_ganchos:
             identificador = gancho.get("id") if isinstance(gancho, dict) else None
             if isinstance(identificador, str) and identificador:
-                ganchos.add(identificador)
+                ganchos[identificador] = gancho
     return camara, ganchos
 
 
 def _destino_existe(
     destino: DestinoPropuesta,
-    camara: dict[str, int],
-    ganchos: set[str],
+    camara: dict[str, dict[str, Any]],
+    ganchos: dict[str, dict[str, Any]],
 ) -> bool:
     ids = camara if destino.tipo == "camara" else ganchos
     return destino.id in ids
@@ -139,8 +142,8 @@ def _destino_existe(
 
 def _toma_valida_para_guion(
     toma: TomaPropuesta,
-    camara: dict[str, int],
-    ganchos: set[str],
+    camara: dict[str, dict[str, Any]],
+    ganchos: dict[str, dict[str, Any]],
 ) -> bool:
     if any(
         destino is not None and not _destino_existe(destino, camara, ganchos)
@@ -150,9 +153,8 @@ def _toma_valida_para_guion(
     for candidato in toma.candidatos:
         if not _destino_existe(candidato, camara, ganchos):
             return False
-        if (
-            candidato.tipo == "camara"
-            and len(candidato.cues or []) != camara[candidato.id]
+        if candidato.tipo == "camara" and len(candidato.cues or []) != len(
+            camara[candidato.id]["cues"]
         ):
             return False
     return True
@@ -224,7 +226,7 @@ def leer_propuesta(
         return None
 
     archivos_en_disco = {entrega.archivo for entrega in entregadas}
-    camara, ganchos = _destinos_guion(guion)
+    camara, ganchos = destinos_guion(guion)
     archivos: list[TomaPropuesta] = []
     nombres_vistos: set[str] = set()
     for datos_toma in datos["archivos"]:

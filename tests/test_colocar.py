@@ -1,11 +1,15 @@
 import hashlib
 import json
+import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+import estudio_api.colocar as modulo_colocar
 from estudio_api.app import crear_app
 from estudio_api.colocar import (
     Asignacion,
@@ -14,6 +18,8 @@ from estudio_api.colocar import (
     id_toma_vertical,
 )
 from estudio_api.decisiones import abrir_bd
+from estudio_api.rutas_acciones import lanzar_plan
+from estudio_api.trabajos import PlanTrabajo, esperar
 from tests.ayudas import TOKEN
 
 
@@ -247,6 +253,57 @@ def test_coloca_cierre_con_texto_reconocido_y_sin_gancho_entregado(cfg):
     assert resultado.ganchos == 0
 
 
+def test_shorts_recien_creado_tiene_la_forma_completa(cfg):
+    archivo = "cierre-nuevo.mov"
+    toma = _toma(archivo, "vertical")
+    toma["texto"] = "Cierre reconocido ficticio."
+    _preparar(cfg, [toma])
+
+    _colocar(cfg, [Asignacion(archivo=archivo, destino="cierre")])
+
+    identificador = id_toma_vertical(archivo)
+    shorts = json.loads(
+        (cfg.estudio_dir / "shorts" / "l4" / "shorts.json").read_text(encoding="utf-8")
+    )
+    assert shorts == {
+        "leccion": "react-04",
+        "numero": 4,
+        "tomas": {identificador: "Cierre reconocido ficticio."},
+        "ganchosEntregados": {},
+        "frases": {},
+        "shorts": [],
+    }
+
+
+def test_dos_cierres_se_colocan_en_la_misma_operacion(cfg):
+    primero = _toma("cierre-uno.mov", "vertical")
+    segundo = _toma("cierre-dos.mov", "vertical")
+    _preparar(cfg, [primero, segundo])
+
+    resultado = _colocar(
+        cfg,
+        [
+            Asignacion(archivo="cierre-uno.mov", destino="cierre"),
+            Asignacion(archivo="cierre-dos.mov", destino="cierre"),
+        ],
+    )
+
+    assert resultado.model_dump() == {
+        "colocadas": [
+            {"archivo": "cierre-uno.mov", "destino": "cierre"},
+            {"archivo": "cierre-dos.mov", "destino": "cierre"},
+        ],
+        "ganchos": 0,
+    }
+    shorts = json.loads(
+        (cfg.estudio_dir / "shorts" / "l4" / "shorts.json").read_text(encoding="utf-8")
+    )
+    assert set(shorts["tomas"]) == {
+        id_toma_vertical("cierre-uno.mov"),
+        id_toma_vertical("cierre-dos.mov"),
+    }
+
+
 @pytest.mark.parametrize(
     ("preparar", "asignaciones", "estado", "mensaje"),
     [
@@ -357,6 +414,37 @@ def test_no_pisa_un_original_que_ya_existe_en_videos(cfg):
     assert despues == antes
 
 
+def test_toma_de_la_propuesta_que_ya_no_esta_en_disco_da_422(cfg):
+    _, entregas = _preparar(cfg, [_toma("borrada.mov")])
+    (entregas / "borrada.mov").unlink()
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo="borrada.mov", destino="E17")])
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Esa toma no está entregada"
+
+
+def test_dos_verticales_con_el_mismo_id_rechazan_la_ruta_de_salida_repetida(cfg):
+    primero = "Facetune0A1B2C3D-demo.MOV"
+    segundo = "Facetune0A1B2C3D-demo 2.MOV"
+    _preparar(cfg, [_toma(primero, "vertical"), _toma(segundo, "vertical")])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(
+            cfg,
+            [
+                Asignacion(archivo=primero, destino="S2"),
+                Asignacion(archivo=segundo, destino="cierre"),
+            ],
+        )
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Hay dos tomas para el mismo destino"
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+
 def test_limpia_analisis_y_propuesta_pero_conserva_asignacion_nula(cfg):
     usadas = _toma("usar.mov")
     ignorada = _toma("guardar.mov")
@@ -382,6 +470,243 @@ def test_limpia_analisis_y_propuesta_pero_conserva_asignacion_nula(cfg):
     assert not any(
         ruta.suffix.lower() in {".mov", ".mp4"} for ruta in entregas.iterdir()
     )
+
+
+def test_limpia_solo_los_tres_analisis_exactos_del_archivo(cfg):
+    usada = _toma("toma.mov")
+    parecida = _toma("toma.mov.b.mov")
+    _, entregas = _preparar(cfg, [usada, parecida])
+    analisis = entregas / ".analisis"
+    (analisis / "toma.mov.wav").write_bytes(b"audio")
+    (analisis / "toma.mov.origen").write_text("origen", encoding="utf-8")
+    (analisis / "toma.mov.extra").write_text("conservar", encoding="utf-8")
+    (analisis / "toma.mov.b.mov.wav").write_bytes(b"audio parecido")
+    (analisis / "toma.mov.b.mov.origen").write_text("parecido", encoding="utf-8")
+
+    _colocar(cfg, [Asignacion(archivo="toma.mov", destino="E17")])
+
+    for extension in ("json", "wav", "origen"):
+        assert not (analisis / f"toma.mov.{extension}").exists()
+        assert (analisis / f"toma.mov.b.mov.{extension}").exists()
+    assert (analisis / "toma.mov.extra").read_text(encoding="utf-8") == "conservar"
+
+
+def test_fallo_al_instalar_la_segunda_copia_revierte_y_permite_reintentar(
+    cfg, monkeypatch
+):
+    archivo = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma(archivo, "vertical")])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    instalar_real = modulo_colocar.instalar_archivando
+    llamadas = 0
+
+    def fallar_segunda(temporal, destino):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 2:
+            raise OSError("fallo simulado al instalar")
+        return instalar_real(temporal, destino)
+
+    monkeypatch.setattr(modulo_colocar, "instalar_archivando", fallar_segunda)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    assert captura.value.estado_http == 503
+    assert captura.value.mensaje == "No se han podido colocar las tomas"
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+    assert not list(cfg.cursos_dir.rglob("*.colocando.*"))
+    assert not list(cfg.estudio_dir.rglob("*.colocando.*"))
+
+    monkeypatch.setattr(modulo_colocar, "instalar_archivando", instalar_real)
+    resultado = _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    assert resultado.ganchos == 1
+
+
+def test_fallo_al_escribir_el_guion_revierte_y_permite_reintentar(cfg, monkeypatch):
+    _preparar(cfg, [_toma("toma-a.mov")])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    escribir_real = modulo_colocar.escribir_json_versionado
+
+    def fallar_escritura(*_args, **_kwargs):
+        raise OSError("fallo simulado al escribir")
+
+    monkeypatch.setattr(modulo_colocar, "escribir_json_versionado", fallar_escritura)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo="toma-a.mov", destino="E17")])
+
+    assert captura.value.estado_http == 503
+    assert captura.value.mensaje == "No se han podido colocar las tomas"
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+    assert not list(cfg.cursos_dir.rglob("*.colocando.*"))
+    assert not list(cfg.estudio_dir.rglob("*.colocando.*"))
+
+    monkeypatch.setattr(modulo_colocar, "escribir_json_versionado", escribir_real)
+    resultado = _colocar(cfg, [Asignacion(archivo="toma-a.mov", destino="E17")])
+
+    assert resultado.colocadas[0].archivo == "toma-a.mov"
+
+
+def test_fallo_al_instalar_restaura_la_copia_archivada(cfg, monkeypatch):
+    guion, _ = _preparar(cfg, [_toma("toma-nueva.mov")])
+    datos = json.loads(guion.read_text(encoding="utf-8"))
+    datos["escenas"][0]["toma"] = {
+        "original": "grabaciones/videos/toma-vieja.mov",
+        "video": "grabaciones/react-04/E17.mov",
+        "desde": 0,
+        "hasta": 2,
+        "cues": [0, 1],
+        "momentos": [{"desde": 1}],
+    }
+    guion.write_text(json.dumps(datos, indent=2) + "\n", encoding="utf-8")
+    video = cfg.estudio_dir / "public" / "grabaciones" / "react-04" / "E17.mov"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video-anterior")
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    instalar_real = modulo_colocar.instalar_archivando
+    llamadas = 0
+
+    def fallar_segunda(temporal, destino):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 2:
+            raise OSError("fallo simulado al instalar")
+        return instalar_real(temporal, destino)
+
+    monkeypatch.setattr(modulo_colocar, "instalar_archivando", fallar_segunda)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo="toma-nueva.mov", destino="E17")])
+
+    assert captura.value.estado_http == 503
+    assert video.read_bytes() == b"video-anterior"
+    assert not (video.parent / "anteriores").exists()
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+
+def test_fallo_al_copiar_no_deja_temporales_ni_carpetas(cfg, monkeypatch):
+    archivo = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma(archivo, "vertical")])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    copia_real = modulo_colocar.shutil.copyfileobj
+    llamadas = 0
+
+    def disco_lleno(*args, **kwargs):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 3:
+            raise OSError(28, "No queda espacio en el disco")
+        return copia_real(*args, **kwargs)
+
+    monkeypatch.setattr(modulo_colocar.shutil, "copyfileobj", disco_lleno)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    assert captura.value.estado_http == 503
+    assert captura.value.mensaje == "No se han podido colocar las tomas"
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+    monkeypatch.setattr(modulo_colocar.shutil, "copyfileobj", copia_real)
+    assert _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")]).ganchos == 1
+
+
+def test_fallo_al_escribir_shorts_restaura_el_guion_ya_escrito(cfg, monkeypatch):
+    vertical = "Facetune0A1B2C3D-demo.MOV"
+    guion, _ = _preparar(cfg, [_toma("toma-a.mov"), _toma(vertical, "vertical")])
+    shorts = cfg.estudio_dir / "shorts" / "l4" / "shorts.json"
+    shorts.parent.mkdir(parents=True)
+    shorts.write_text(
+        json.dumps(
+            {
+                "leccion": "react-04",
+                "numero": 4,
+                "tomas": {},
+                "ganchosEntregados": {},
+                "frases": {},
+                "shorts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bytes_guion = guion.read_bytes()
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    escribir_real = modulo_colocar.escribir_json_versionado
+
+    def fallar_shorts(ruta, datos, version):
+        if ruta.name == "shorts.json":
+            raise OSError("fallo simulado al escribir shorts.json")
+        return escribir_real(ruta, datos, version)
+
+    monkeypatch.setattr(modulo_colocar, "escribir_json_versionado", fallar_shorts)
+    asignaciones = [
+        Asignacion(archivo="toma-a.mov", destino="E17"),
+        Asignacion(archivo=vertical, destino="S2"),
+    ]
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, asignaciones)
+
+    assert captura.value.estado_http == 503
+    assert guion.read_bytes() == bytes_guion
+    assert not guion.with_name("react-04.json.antes-de-editar").exists()
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+    monkeypatch.setattr(modulo_colocar, "escribir_json_versionado", escribir_real)
+    resultado = _colocar(cfg, asignaciones)
+
+    assert resultado.ganchos == 1
+    assert "toma" in json.loads(guion.read_text(encoding="utf-8"))["escenas"][0]
+
+
+def test_lanzar_falla_mientras_se_coloca_y_funciona_al_terminar(cfg, monkeypatch):
+    _preparar(cfg, [_toma("toma-a.mov")])
+    copia_iniciada = threading.Event()
+    continuar = threading.Event()
+    copia_real = modulo_colocar.shutil.copyfileobj
+    primera = True
+    errores: list[Exception] = []
+
+    def copiar_bloqueando(*args, **kwargs):
+        nonlocal primera
+        if primera:
+            primera = False
+            copia_iniciada.set()
+            if not continuar.wait(5):
+                raise TimeoutError("la prueba no liberó la copia")
+        return copia_real(*args, **kwargs)
+
+    def colocar_en_hilo():
+        try:
+            _colocar(cfg, [Asignacion(archivo="toma-a.mov", destino="E17")])
+        except Exception as error:  # noqa: BLE001 - se comprueba en el assert
+            errores.append(error)
+
+    monkeypatch.setattr(modulo_colocar.shutil, "copyfileobj", copiar_bloqueando)
+    hilo = threading.Thread(target=colocar_en_hilo)
+    hilo.start()
+    assert copia_iniciada.wait(5)
+    plan = PlanTrabajo(
+        accion="prueba",
+        objetivo=None,
+        comando=[sys.executable, "-c", "pass"],
+        cwd=cfg.estudio_dir,
+    )
+    try:
+        with pytest.raises(HTTPException) as captura:
+            lanzar_plan(cfg, "react", 4, plan)
+        assert captura.value.status_code == 409
+        assert captura.value.detail == "Ya hay un trabajo en marcha"
+    finally:
+        continuar.set()
+        hilo.join(5)
+
+    assert not hilo.is_alive()
+    assert errores == []
+    trabajo = lanzar_plan(cfg, "react", 4, plan)
+    esperar(trabajo.id, 5)
 
 
 def test_id_vertical_de_nombre_generico_es_hexadecimal_estable():
@@ -452,3 +777,16 @@ def test_post_colocar_rechaza_campos_extra(cfg):
         )
 
     assert respuesta.status_code == 422
+
+
+def test_post_colocar_leccion_inexistente_devuelve_404(cfg):
+    config = cfg.model_copy(update={"token_escritura": TOKEN})
+    with TestClient(crear_app(config), base_url="http://127.0.0.1:8000") as cliente:
+        respuesta = cliente.post(
+            "/api/cursos/react/lecciones/99/entregas/colocar",
+            headers={"X-Estudio-Token": TOKEN},
+            json={"asignaciones": []},
+        )
+
+    assert respuesta.status_code == 404
+    assert respuesta.json()["detail"] == "La lección no existe"

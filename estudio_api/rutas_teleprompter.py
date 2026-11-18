@@ -122,8 +122,13 @@ def guardar_textos_guion(
             raise HTTPException(status_code=422, detail=mensaje) from error
         try:
             escribir_json_versionado(ruta, guion_actualizado, version_inicial)
-        except (ConflictoEscrituraGuion, OSError) as error:
+        except ConflictoEscrituraGuion as error:
             raise HTTPException(status_code=409, detail=conflicto) from error
+        except OSError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="No se han podido guardar los textos",
+            ) from error
         with closing(abrir_bd(config.bd_ruta)) as bd:
             teleprompter = leer_teleprompter(config, bd, curso, numero)
         if teleprompter is None:
