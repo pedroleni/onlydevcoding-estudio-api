@@ -900,6 +900,27 @@ def test_cierre_no_pisa_el_texto_corregido_a_mano(cfg):
     assert guardado["tomas"] == {identificador: "Texto ficticio corregido a mano."}
 
 
+def test_gancho_no_pisa_el_texto_corregido_a_mano(cfg):
+    archivo = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma(archivo, "vertical")])
+    shorts = _shorts_a_mano(
+        cfg,
+        {
+            "leccion": "react-04",
+            "numero": 4,
+            "tomas": {"0A1B2C3D": "texto corregido"},
+            "ganchosEntregados": {"S2": "OTRA"},
+        },
+    )
+
+    resultado = _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    guardado = json.loads(shorts.read_text(encoding="utf-8"))
+    assert guardado["tomas"] == {"0A1B2C3D": "texto corregido"}
+    assert guardado["ganchosEntregados"] == {"S2": "0A1B2C3D"}
+    assert resultado.ganchos == 1
+
+
 def test_fallo_de_ruta_al_limpiar_analisis_no_impide_responder(
     cfg, monkeypatch, caplog
 ):

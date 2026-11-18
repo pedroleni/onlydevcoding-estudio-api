@@ -54,6 +54,9 @@ IdAccion = Literal[
 
 PATRON_ID_SHORT = re.compile(r"^[a-z0-9-]{1,60}$")
 PATRON_ID_ESCENA = re.compile(r"^E\d{2}$")
+PATRON_ID_GANCHO = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+# Las tomas verticales entregadas: lo que acepta ``herramientas/color/ganchos.mjs``.
+PATRON_ID_TOMA = re.compile(r"^[0-9A-F]{8}$")
 # Subcarpeta de ``grabaciones/videos/`` de las tomas colocadas a mano.
 PATRON_SUBCARPETA_ORIGINALES = re.compile(r"^[a-z0-9-]+$")
 PROGRESO_NINGUNO = re.compile(r"(?!)")
@@ -94,6 +97,7 @@ class OpcionesAccion(BaseModel):
     previa: str | None = None
     short: str | None = None
     escena: str | None = Field(default=None, pattern=r"^E[0-9]{2}$")
+    gancho: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,40}$")
 
 
 class EstadoAccion(BaseModel):
@@ -455,6 +459,22 @@ def _datos_shorts(contexto: _Contexto) -> dict[str, Any] | None:
     return datos
 
 
+def _ganchos_entregados(contexto: _Contexto) -> dict[str, str]:
+    """Gancho del guion → id de su toma vertical, solo con ids válidos."""
+    datos = _datos_shorts(contexto)
+    entregados = datos.get("ganchosEntregados") if datos is not None else None
+    if not isinstance(entregados, dict):
+        return {}
+    return {
+        gancho: toma
+        for gancho, toma in entregados.items()
+        if isinstance(gancho, str)
+        and PATRON_ID_GANCHO.fullmatch(gancho) is not None
+        and isinstance(toma, str)
+        and PATRON_ID_TOMA.fullmatch(toma) is not None
+    }
+
+
 def _escenas_camara(contexto: _Contexto) -> list[dict[str, Any]]:
     escenas = (
         contexto.datos_guion.get("escenas")
@@ -677,14 +697,19 @@ def _evaluar_identificar_tomas(
 
 def _evaluar_color_ganchos(
     contexto: _Contexto,
-    _opciones: OpcionesAccion,
-    _para_plan: bool,
+    opciones: OpcionesAccion,
+    para_plan: bool,
 ) -> _Evaluacion:
-    datos = _datos_shorts(contexto)
-    entregados = datos.get("ganchosEntregados") if datos is not None else None
-    if not isinstance(entregados, dict) or not entregados:
+    ganchos = tuple(_ganchos_entregados(contexto))
+    if not ganchos:
         return _no_disponible("No hay ganchos entregados")
-    return _Evaluacion(True)
+    if para_plan and opciones.gancho not in ganchos:
+        return _no_disponible(
+            "Ese gancho no está entregado",
+            estado_http=422,
+            opciones=ganchos,
+        )
+    return _Evaluacion(True, opciones=ganchos)
 
 
 def _evaluar_mejorar_toma(
@@ -989,14 +1014,21 @@ def _plan_identificar_tomas(contexto: _Contexto) -> PlanTrabajo:
     )
 
 
-def _plan_color_ganchos(contexto: _Contexto) -> PlanTrabajo:
+def _plan_color_ganchos(
+    contexto: _Contexto,
+    opciones: OpcionesAccion,
+) -> PlanTrabajo:
+    toma = _ganchos_entregados(contexto).get(opciones.gancho)
+    if toma is None:
+        raise AccionNoDisponible(422, "Ese gancho no está entregado")
     return PlanTrabajo(
         accion="color-ganchos",
-        objetivo=None,
+        objetivo=opciones.gancho,
         comando=[
             _binario("node"),
             "herramientas/color/ganchos.mjs",
             f"l{contexto.numero}",
+            toma,
         ],
         cwd=contexto.config.estudio_dir,
         patron_progreso=PROGRESO_HERRAMIENTA,
@@ -1088,7 +1120,7 @@ def plan_accion(
         if accion == "identificar-tomas":
             return _plan_identificar_tomas(contexto)
         if accion == "color-ganchos":
-            return _plan_color_ganchos(contexto)
+            return _plan_color_ganchos(contexto, opciones)
         return _plan_mejorar_toma(contexto, opciones)
     except ValueError as error:
         raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
@@ -1113,7 +1145,7 @@ def estados_acciones(
         )
         ultimo = ultimo_trabajo(bd, accion, curso, numero)
         ultimos: dict[str, Trabajo] = {}
-        if accion in {"render-short", "mejorar-toma"}:
+        if accion in {"render-short", "color-ganchos", "mejorar-toma"}:
             for objetivo in evaluacion.opciones:
                 trabajo = ultimo_trabajo(
                     bd,

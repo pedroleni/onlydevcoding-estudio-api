@@ -79,7 +79,7 @@ Igual que en la fase 5:
   | id | Etiqueta | Comando | Resultado | Tiempo máx. | Progreso |
   |---|---|---|---|---|---|
   | `identificar-tomas` | Identificar las tomas | `[node, "herramientas/identificar-tomas.mjs", <guion>]` | escribe `entregas/propuesta.json` | 1 h | `^PROGRESO (\d+)/(\d+)$` |
-  | `color-ganchos` | Ajustar el color de los ganchos | `[node, "herramientas/color/ganchos.mjs", "l<numero>"]` | escribe en su sitio | 1 h | `^PROGRESO (\d+)/(\d+)$` |
+  | `color-ganchos` (objetivo: gancho; opción `gancho` obligatoria, `^[A-Za-z0-9_-]{1,40}$`, que esté en `ganchosEntregados` o 422 «Ese gancho no está entregado»; `opciones` = ganchos entregados, `ultimos` = el último trabajo por gancho) | Ajustar el color de los ganchos | `[node, "herramientas/color/ganchos.mjs", "l<numero>", <ID de la toma del gancho>]` | escribe en su sitio, solo esa toma | 1 h | `^PROGRESO (\d+)/(\d+)$` |
   | `mejorar-toma` (objetivo: escena) | Mejorar con IA | `["/bin/zsh", "-f", "herramientas/superres/superres.sh", <original absoluto>, <temporal>]` | `public/grabaciones/<guion>/<E>.mov`, archivando el anterior, y copia en `<lección>/grabaciones/videos/ia/<E>.mov`, archivando la anterior | 3 h | ninguno |
 
   - **Requisitos** (409 con el mensaje literal):
@@ -375,6 +375,11 @@ Igual que en la fase 5:
 - [ ] **Step 3:** `/security-review` en los dos repos, con atención a la subida (nombres, tamaño y enlaces), la propuesta leída del disco y los comandos nuevos. Guardar los informes y arreglar lo que salga.
 - [ ] **Step 4:** Revisión final de las dos ramas con un revisor nuevo, y arreglos.
 - [ ] **Step 5:** Push y PR de los tres repos (el de `tech-study-videos` primero) con la CI en verde, con permiso del autor. Merge solo con su visto bueno.
+
+## Cambios tras la verificación (decisión del autor)
+
+- **El color de los ganchos es a demanda.** `piel-natural` no se aplica de serie al colocar: es una herramienta que el autor usa solo en los ganchos que elige. Colocar ya no lanza `color-ganchos`; Grabaciones muestra un botón «Ajustar el color» por gancho entregado, con la etiqueta «Color ajustado» o «Color original». `color-ganchos` exige la opción `gancho` (comando `[node, "herramientas/color/ganchos.mjs", "l<numero>", <ID>]`, objetivo = gancho; 422 «Ese gancho no está entregado»). Donde este plan dice que se lanza tras colocar o que hay un botón para toda la lección, manda esto.
+- **Los textos corregidos de las tomas se respetan.** Al colocar un gancho o un cierre, un `tomas[ID]` que ya exista en `shorts.json` no se sustituye: se corrige a mano para que coincida con lo que se dice en el vídeo.
 
 ## Fuera de esta fase
 

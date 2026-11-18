@@ -393,7 +393,9 @@ def test_plan_accion_construye_los_tres_comandos_de_tomas(catalogo, monkeypatch)
     )
 
     identificar = plan_accion(config, "react", 4, "identificar-tomas", OpcionesAccion())
-    color = plan_accion(config, "react", 4, "color-ganchos", OpcionesAccion())
+    color = plan_accion(
+        config, "react", 4, "color-ganchos", OpcionesAccion(gancho="g1")
+    )
     mejorar = plan_accion(
         config, "react", 4, "mejorar-toma", OpcionesAccion(escena="E17")
     )
@@ -410,7 +412,9 @@ def test_plan_accion_construye_los_tres_comandos_de_tomas(catalogo, monkeypatch)
         "/bin-falso/node",
         "herramientas/color/ganchos.mjs",
         "l4",
+        "12345678",
     ]
+    assert color.objetivo == "g1"
     assert mejorar.comando == [
         "/bin/zsh",
         "-f",
@@ -446,12 +450,134 @@ def test_identificar_tomas_sin_entregas_da_409(catalogo):
     assert captura.value.mensaje == "No hay tomas entregadas"
 
 
-def test_color_ganchos_sin_ganchos_entregados_da_409(catalogo):
+@pytest.mark.parametrize("gancho", [None, "g1"])
+def test_color_ganchos_sin_ganchos_entregados_da_409(catalogo, gancho):
     with pytest.raises(AccionNoDisponible) as captura:
-        plan_accion(catalogo["config"], "react", 4, "color-ganchos", OpcionesAccion())
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "color-ganchos",
+            OpcionesAccion(gancho=gancho),
+        )
 
     assert captura.value.estado_http == 409
     assert captura.value.mensaje == "No hay ganchos entregados"
+
+
+def _ganchos_entregados(catalogo, entregados):
+    shorts = json.loads(catalogo["shorts"].read_text(encoding="utf-8"))
+    shorts["ganchosEntregados"] = entregados
+    catalogo["shorts"].write_text(json.dumps(shorts), encoding="utf-8")
+
+
+def test_color_ganchos_procesa_solo_el_gancho_elegido(catalogo, monkeypatch):
+    _ganchos_entregados(catalogo, {"g1": "12345678", "g2": "ABCDEF12"})
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+
+    plan = plan_accion(
+        catalogo["config"], "react", 4, "color-ganchos", OpcionesAccion(gancho="g2")
+    )
+
+    assert plan.comando == [
+        "/bin-falso/node",
+        "herramientas/color/ganchos.mjs",
+        "l4",
+        "ABCDEF12",
+    ]
+    assert plan.objetivo == "g2"
+
+
+@pytest.mark.parametrize("gancho", [None, "g9", "g2"])
+def test_color_ganchos_con_gancho_no_entregado_da_422(catalogo, monkeypatch, gancho):
+    # g2 tiene una toma con id inválido: no cuenta como entregado.
+    _ganchos_entregados(catalogo, {"g1": "12345678", "g2": "../malo"})
+
+    def no_buscar(_nombre):
+        raise AssertionError("No se debe buscar ningún binario")
+
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", no_buscar)
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "color-ganchos",
+            OpcionesAccion(gancho=gancho),
+        )
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Ese gancho no está entregado"
+
+
+def test_post_color_ganchos_valida_el_gancho(catalogo, monkeypatch):
+    _ganchos_entregados(catalogo, {"g1": "12345678"})
+    llamadas = []
+    monkeypatch.setattr(
+        "estudio_api.rutas_acciones.lanzar", lambda *args: llamadas.append(args)
+    )
+    ruta = f"{RUTA_ACCIONES}/color-ganchos"
+    cliente = catalogo["cliente"]
+
+    sin_gancho = cliente.post(ruta, headers=CABECERAS, json={})
+    no_entregado = cliente.post(ruta, headers=CABECERAS, json={"gancho": "g2"})
+    manipulado = cliente.post(ruta, headers=CABECERAS, json={"gancho": "../g1"})
+    largo = cliente.post(ruta, headers=CABECERAS, json={"gancho": "g" * 41})
+
+    assert sin_gancho.status_code == 422
+    assert sin_gancho.json()["detail"] == "Ese gancho no está entregado"
+    assert no_entregado.status_code == 422
+    assert no_entregado.json()["detail"] == "Ese gancho no está entregado"
+    assert manipulado.status_code == 422
+    assert largo.status_code == 422
+    assert llamadas == []
+
+
+def test_color_ganchos_lista_ganchos_entregados_y_ultimo_por_gancho(catalogo):
+    _ganchos_entregados(
+        catalogo,
+        {"g1": "12345678", "g2": "ABCDEF12", "g3": "minusc12", "../g4": "0A1B2C3D"},
+    )
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd, bd:
+        bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('color-ganchos', 'react', 4, 'g1', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        cursor = bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('color-ganchos', 'react', 4, 'g2', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        ultimo_id = cursor.lastrowid
+
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    assert respuesta.status_code == 200
+    color = {accion["id"]: accion for accion in respuesta.json()}["color-ganchos"]
+    assert color["disponible"] is True
+    assert color["opciones"] == ["g1", "g2"]
+    assert set(color["ultimos"]) == {"g1", "g2"}
+    assert color["ultimos"]["g2"]["id"] == ultimo_id
+    assert color["ultimo"]["id"] == ultimo_id
+
+
+def test_color_ganchos_sin_ganchos_entregados_mantiene_el_motivo(catalogo):
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    color = {accion["id"]: accion for accion in respuesta.json()}["color-ganchos"]
+    assert color["disponible"] is False
+    assert color["motivo"] == "No hay ganchos entregados"
+    assert color["opciones"] == []
+    assert color["ultimos"] == {}
 
 
 def test_mejorar_toma_rechaza_escena_inexistente(catalogo):

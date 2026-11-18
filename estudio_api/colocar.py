@@ -633,12 +633,12 @@ def _colocar_tomas(
                 or plan.texto_vertical is None
             ):
                 raise OSError("Faltan los datos de la toma vertical")
-            if plan.destino == "cierre":
-                # Los ids de cierre se repiten entre lecciones y su texto se
-                # corrige a mano: si ya está, se respeta.
-                shorts["tomas"].setdefault(plan.id_vertical, plan.texto_vertical)
-            else:
-                shorts["tomas"][plan.id_vertical] = plan.texto_vertical
+            # El texto de una toma vertical se corrige a mano para que coincida
+            # con lo que se dice en el vídeo (de ahí salen los subtítulos de
+            # los shorts): si ya está, se respeta. Los ids de cierre, además,
+            # se repiten entre lecciones.
+            shorts["tomas"].setdefault(plan.id_vertical, plan.texto_vertical)
+            if plan.destino != "cierre":
                 shorts["ganchosEntregados"][plan.destino] = plan.id_vertical
             continue
         candidato = plan.candidato
