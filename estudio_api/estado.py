@@ -65,6 +65,30 @@ def avance_por_red(
     }
 
 
+def avance_por_grupo(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, dict[str, Avance]]:
+    """Avance por red separando la lección completa («leccion») de reels y shorts («cortos»).
+
+    En Instagram y TikTok no va la lección, solo los cortos: así se ve qué es cada cosa.
+    """
+    previstas = _piezas_previstas(publicacion)
+    grupos: dict[str, dict[str, Avance]] = {}
+    for grupo, es_del_grupo in (
+        ("leccion", lambda pieza: pieza == "leccion"),
+        ("cortos", lambda pieza: pieza != "leccion"),
+    ):
+        grupos[grupo] = {}
+        for red, pares in previstas.items():
+            del_grupo = [par for par in pares if es_del_grupo(par[0])]
+            grupos[grupo][red] = Avance(
+                hechas=sum(_publicada(estados, par) for par in del_grupo),
+                total=len(del_grupo),
+            )
+    return grupos
+
+
 def _ruta_de_leccion(
     config: Config,
     carpeta: Path | None,
@@ -260,4 +284,5 @@ def calcular_estado(
         previa=_ultima_previa(config, carpeta),
         publicado=publicado_por_red(publicacion, estados_publicacion or {}),
         publicado_avance=avance_por_red(publicacion, estados_publicacion or {}),
+        publicado_por_grupo=avance_por_grupo(publicacion, estados_publicacion or {}),
     )

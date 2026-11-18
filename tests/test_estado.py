@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from estudio_api.estado import avance_por_red, calcular_estado, publicado_por_red
+from estudio_api.estado import (
+    avance_por_grupo,
+    avance_por_red,
+    calcular_estado,
+    publicado_por_red,
+)
 from estudio_api.modelos import Avance, EstadoRed
 from estudio_api.publicacion import Publicacion
 
@@ -280,3 +285,41 @@ def test_avance_por_red_sin_json_preve_solo_leccion_en_youtube():
 
     assert (resultado["youtube"].hechas, resultado["youtube"].total) == (0, 1)
     assert resultado["instagram"].total == 0
+
+
+def test_avance_por_grupo_separa_la_leccion_de_reels_y_shorts():
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {
+                    "redes": {
+                        "youtube": {"descripcion": "Texto ficticio"},
+                        "linkedin": {"texto": "Texto ficticio"},
+                    }
+                },
+                "reel-salida": {
+                    "redes": {
+                        "youtube": {"descripcion": "Otro texto ficticio"},
+                        "instagram": {"texto": "Otro texto ficticio"},
+                    }
+                },
+                "short-1": {"redes": {"instagram": {"texto": "Más texto ficticio"}}},
+            },
+        }
+    )
+    resultado = avance_por_grupo(
+        publicacion,
+        {
+            ("leccion", "youtube"): EstadoRed(estado="publicado"),
+            ("reel-salida", "instagram"): EstadoRed(estado="publicado"),
+        },
+    )
+
+    def resumen(grupo: str) -> dict[str, tuple[int, int]]:
+        return {
+            red: (a.hechas, a.total) for red, a in resultado[grupo].items() if a.total
+        }
+
+    assert resumen("leccion") == {"youtube": (1, 1), "linkedin": (0, 1)}
+    assert resumen("cortos") == {"youtube": (0, 1), "instagram": (1, 2)}

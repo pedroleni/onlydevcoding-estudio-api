@@ -78,6 +78,8 @@ class EstadoLeccion(BaseModel):
     previa: str | None = None
     publicado: dict[str, bool] = Field(default_factory=dict)
     publicado_avance: dict[str, Avance] = Field(default_factory=dict)
+    # «leccion» y «cortos» (reels y shorts), cada uno con su avance por red.
+    publicado_por_grupo: dict[str, dict[str, Avance]] = Field(default_factory=dict)
 
 
 class Escena(BaseModel):
