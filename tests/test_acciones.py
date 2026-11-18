@@ -358,6 +358,164 @@ def test_plan_accion_construye_los_siete_comandos_exactos(catalogo, monkeypatch)
     )
 
 
+def _preparar_acciones_de_tomas(catalogo):
+    carpeta = catalogo["carpeta"]
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "titulo": "Escena ficticia de cámara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": "grabaciones/videos/original.mov"},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+    original = carpeta / "grabaciones" / "videos" / "original.mov"
+    original.parent.mkdir()
+    original.write_bytes(b"original-ficticio")
+    entregas = carpeta / "grabaciones" / "entregas"
+    entregas.mkdir()
+    (entregas / "Facetune12345678.MOV").write_bytes(b"entrega-ficticia")
+    shorts = json.loads(catalogo["shorts"].read_text(encoding="utf-8"))
+    shorts["ganchosEntregados"] = {"g1": "12345678"}
+    catalogo["shorts"].write_text(json.dumps(shorts), encoding="utf-8")
+    return original
+
+
+def test_plan_accion_construye_los_tres_comandos_de_tomas(catalogo, monkeypatch):
+    config = catalogo["config"]
+    carpeta = catalogo["carpeta"]
+    original = _preparar_acciones_de_tomas(catalogo)
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+
+    identificar = plan_accion(config, "react", 4, "identificar-tomas", OpcionesAccion())
+    color = plan_accion(config, "react", 4, "color-ganchos", OpcionesAccion())
+    mejorar = plan_accion(
+        config, "react", 4, "mejorar-toma", OpcionesAccion(escena="E17")
+    )
+
+    destino = config.estudio_dir / "public" / "grabaciones" / "react-04" / "E17.mov"
+    temporal = destino.with_name(".E17.generando.mov")
+    assert identificar.comando == [
+        "/bin-falso/node",
+        "herramientas/identificar-tomas.mjs",
+        "react-04",
+    ]
+    assert identificar.entorno == {"CURSOS_DIR": str(config.cursos_dir)}
+    assert color.comando == [
+        "/bin-falso/node",
+        "herramientas/color/ganchos.mjs",
+        "l4",
+    ]
+    assert mejorar.comando == [
+        "/bin/zsh",
+        "-f",
+        "herramientas/superres/superres.sh",
+        str(original),
+        str(temporal),
+    ]
+    assert mejorar.objetivo == "E17"
+    assert mejorar.temporal == temporal
+    assert mejorar.destino == destino
+    assert mejorar.copia == carpeta / "grabaciones" / "videos" / "ia" / "E17.mov"
+    assert mejorar.instalar == "archivar"
+    assert identificar.tiempo_maximo == color.tiempo_maximo == 60 * 60
+    assert mejorar.tiempo_maximo == 3 * 60 * 60
+    assert identificar.patron_progreso == color.patron_progreso == PROGRESO_HERRAMIENTA
+    assert mejorar.patron_progreso == PROGRESO_NINGUNO
+    assert all(
+        plan.mensajes == MENSAJES_HERRAMIENTA for plan in (identificar, color, mejorar)
+    )
+
+
+def test_identificar_tomas_sin_entregas_da_409(catalogo):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "identificar-tomas",
+            OpcionesAccion(),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "No hay tomas entregadas"
+
+
+def test_color_ganchos_sin_ganchos_entregados_da_409(catalogo):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(catalogo["config"], "react", 4, "color-ganchos", OpcionesAccion())
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "No hay ganchos entregados"
+
+
+def test_mejorar_toma_rechaza_escena_inexistente(catalogo):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E99"),
+        )
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Esa escena no existe"
+
+
+def test_mejorar_toma_lista_escenas_con_toma_y_ultimo_por_escena(catalogo):
+    _preparar_acciones_de_tomas(catalogo)
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd, bd:
+        cursor = bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('mejorar-toma', 'react', 4, 'E17', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        trabajo_id = cursor.lastrowid
+
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    assert respuesta.status_code == 200
+    acciones = {accion["id"]: accion for accion in respuesta.json()}
+    assert acciones["mejorar-toma"]["opciones"] == ["E17"]
+    assert acciones["mejorar-toma"]["ultimo"]["id"] == trabajo_id
+    assert acciones["mejorar-toma"]["ultimos"]["E17"]["id"] == trabajo_id
+
+
+@pytest.mark.parametrize("original", [None, "../../fuera.mov"])
+def test_mejorar_toma_rechaza_escena_sin_original_seguro(catalogo, original):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    escena = {
+        "id": "E17",
+        "modo": "camara",
+        "titulo": "Escena ficticia",
+        "cues": [{"texto": "Texto ficticio."}],
+    }
+    if original is not None:
+        escena["toma"] = {"original": original}
+    guion["escenas"].append(escena)
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
 def test_video_final_usa_slug_de_la_carpeta_en_disco(catalogo):
     guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
     guion["carpeta"] = "REACT/04-slug-declarado-en-guion"
@@ -483,6 +641,9 @@ def test_get_acciones_calcula_disponibilidad_y_opciones(catalogo):
         "video-final",
         "preparar-shorts",
         "render-short",
+        "identificar-tomas",
+        "color-ganchos",
+        "mejorar-toma",
     ]
     assert acciones["alinear-voz"]["disponible"] is False
     assert acciones["alinear-voz"]["motivo"] == "No hay voz grabada que alinear"
@@ -903,7 +1064,8 @@ def test_put_textos_mientras_se_prepara_el_montaje_da_409(catalogo, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "accion", ["alinear-voz", "preparar-montaje", "preparar-shorts"]
+    "accion",
+    ["alinear-voz", "preparar-montaje", "preparar-shorts", "identificar-tomas"],
 )
 def test_put_textos_y_toma_con_trabajo_de_la_leccion_dan_409(
     catalogo, monkeypatch, accion

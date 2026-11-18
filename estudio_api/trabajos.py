@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import stat
@@ -75,6 +76,7 @@ class PlanTrabajo:
     cwd: Path
     temporal: Path | None = None
     destino: Path | None = None
+    copia: Path | None = None
     instalar: Literal["reemplazar", "sin_pisar", "archivar"] = "reemplazar"
     entorno: Mapping[str, str] = field(default_factory=dict)
     patron_progreso: re.Pattern[str] = PROGRESO_REMOTION
@@ -417,27 +419,8 @@ def _ruta_archivada(destino: Path) -> Path:
         indice += 1
 
 
-def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
-    """Instala el temporal en su destino sin seguir enlaces simbólicos.
-
-    El temporal tiene que ser un archivo regular y el destino, si existe,
-    también; ``anteriores/`` tiene que ser un directorio real. Si algo no
-    cuadra no se mueve ni se pisa nada.
-    """
-    temporal = plan.temporal
-    destino = plan.destino
-    if temporal is None or destino is None:
-        return
-    _exigir_temporal_regular(temporal)
+def _instalar_archivando(temporal: Path, destino: Path) -> None:
     destino_existente = _destino_actual(destino)
-    if plan.instalar == "reemplazar":
-        os.replace(temporal, destino)
-        return
-    if plan.instalar == "sin_pisar":
-        os.link(temporal, destino, follow_symlinks=False)
-        _borrar_temporal_sin_fallar(temporal, trabajo_id)
-        return
-
     if destino_existente is None:
         os.replace(temporal, destino)
         return
@@ -453,6 +436,81 @@ def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
                 "No se pudo restaurar el resultado anterior tras fallar la instalación",
                 exc_info=True,
             )
+        raise
+
+
+def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
+    """Instala el temporal en su destino sin seguir enlaces simbólicos.
+
+    El temporal tiene que ser un archivo regular y el destino, si existe,
+    también; ``anteriores/`` tiene que ser un directorio real. Si algo no
+    cuadra no se mueve ni se pisa nada.
+    """
+    temporal = plan.temporal
+    destino = plan.destino
+    if temporal is None or destino is None:
+        return
+    _exigir_temporal_regular(temporal)
+    _destino_actual(destino)
+    if plan.instalar == "reemplazar":
+        os.replace(temporal, destino)
+        return
+    if plan.instalar == "sin_pisar":
+        os.link(temporal, destino, follow_symlinks=False)
+        _borrar_temporal_sin_fallar(temporal, trabajo_id)
+        return
+
+    _instalar_archivando(temporal, destino)
+
+
+def _temporal_copia(copia: Path) -> Path:
+    return copia.with_name(f".{copia.stem}.copiando{copia.suffix}")
+
+
+def _copiar_resultado(origen: Path, temporal: Path) -> None:
+    """Copia un resultado regular a un temporal nuevo sin seguir enlaces."""
+    temporal.unlink(missing_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor_origen = os.open(origen, os.O_RDONLY | nofollow)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor_origen).st_mode):
+            raise _InstalacionInsegura("El resultado no es un archivo regular")
+        descriptor_temporal = os.open(
+            temporal,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+        try:
+            with (
+                os.fdopen(descriptor_origen, "rb") as fuente,
+                os.fdopen(descriptor_temporal, "wb") as salida,
+            ):
+                descriptor_origen = -1
+                descriptor_temporal = -1
+                shutil.copyfileobj(fuente, salida)
+                salida.flush()
+                os.fsync(salida.fileno())
+        finally:
+            if descriptor_temporal >= 0:
+                os.close(descriptor_temporal)
+    finally:
+        if descriptor_origen >= 0:
+            os.close(descriptor_origen)
+
+
+def _guardar_copia(plan: PlanTrabajo) -> None:
+    copia = plan.copia
+    if copia is None:
+        return
+    if plan.destino is None:
+        raise _InstalacionInsegura("La copia no tiene un resultado de origen")
+    temporal = _temporal_copia(copia)
+    try:
+        _copiar_resultado(plan.destino, temporal)
+        _exigir_temporal_regular(temporal)
+        _instalar_archivando(temporal, copia)
+    except BaseException:
+        temporal.unlink(missing_ok=True)
         raise
 
 
@@ -625,6 +683,7 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
 
         try:
             _instalar_resultado(plan, trabajo_id)
+            _guardar_copia(plan)
         except OSError as error:
             if plan.instalar == "sin_pisar" and isinstance(error, FileExistsError):
                 logger.warning("El destino del trabajo %s ya existe", trabajo_id)

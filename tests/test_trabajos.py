@@ -1096,6 +1096,115 @@ def test_archivar_conserva_el_anterior_e_instala_el_nuevo(tmp_path):
     assert anteriores[0].read_bytes() == b"anterior"
 
 
+def test_copia_durable_conserva_el_mismo_resultado(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mov"
+    destino = tmp_path / "public" / "video.mov"
+    copia = tmp_path / "leccion" / "ia" / "E17.mov"
+    destino.parent.mkdir()
+    copia.parent.mkdir(parents=True)
+    plan = PlanTrabajo(
+        accion="mejorar-toma",
+        objetivo="E17",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'mejorada')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        copia=copia,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert destino.read_bytes() == b"mejorada"
+    assert copia.read_bytes() == destino.read_bytes()
+
+
+def test_copia_durable_archiva_la_copia_anterior(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mov"
+    destino = tmp_path / "public" / "video.mov"
+    copia = tmp_path / "leccion" / "ia" / "E17.mov"
+    destino.parent.mkdir()
+    copia.parent.mkdir(parents=True)
+    copia.write_bytes(b"copia-anterior")
+    plan = PlanTrabajo(
+        accion="mejorar-toma",
+        objetivo="E17",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'mejorada')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        copia=copia,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert copia.read_bytes() == b"mejorada"
+    anteriores = list((copia.parent / "anteriores").glob("E17-*.mov"))
+    assert len(anteriores) == 1
+    assert anteriores[0].read_bytes() == b"copia-anterior"
+
+
+def test_fallo_al_instalar_copia_deja_el_destino_y_el_trabajo_en_error(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mov"
+    destino = tmp_path / "public" / "video.mov"
+    copia = tmp_path / "leccion" / "ia" / "E17.mov"
+    destino.parent.mkdir()
+    copia.parent.mkdir(parents=True)
+    reemplazar_real = os.replace
+
+    def reemplazar_con_fallo(origen, final):
+        if os.fspath(final) == os.fspath(copia):
+            raise OSError("fallo forzado")
+        reemplazar_real(origen, final)
+
+    monkeypatch.setattr(modulo_trabajos.os, "replace", reemplazar_con_fallo)
+    plan = PlanTrabajo(
+        accion="mejorar-toma",
+        objetivo="E17",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'mejorada')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        copia=copia,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"mejorada"
+    assert not copia.exists()
+    assert not any(copia.parent.glob(".*copiando*"))
+
+
 def test_archivar_dos_veces_con_la_misma_marca_no_pisa(tmp_path, monkeypatch):
     monkeypatch.setattr(
         modulo_trabajos, "_marca_archivo", lambda: "20261118T120000123456"

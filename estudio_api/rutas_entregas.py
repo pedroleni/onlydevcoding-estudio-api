@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response, status
+from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 
 from estudio_api.entregas import (
@@ -13,6 +14,9 @@ from estudio_api.entregas import (
     guardar_entrega,
     listar_entregas,
 )
+from estudio_api.lectura import _leer_json, datos_curso
+from estudio_api.propuesta import PATRON_ESCENA_CAMARA, Propuesta, leer_propuesta
+from estudio_api.rutas import ruta_segura
 from estudio_api.rutas_api import CursoId, NumeroLeccion, config_peticion
 
 router = APIRouter(prefix="/api")
@@ -24,21 +28,118 @@ NOMBRE_NO_ADMITIDO = (
 )
 
 
+class DestinoCamara(BaseModel):
+    id: str
+    titulo: str
+    tiene_toma: bool
+
+
+class DestinoGancho(BaseModel):
+    id: str
+    titulo: str
+    entregado: bool
+
+
+class Destinos(BaseModel):
+    camara: list[DestinoCamara] = Field(default_factory=list)
+    ganchos: list[DestinoGancho] = Field(default_factory=list)
+
+
+class Entregas(BaseModel):
+    archivos: list[ArchivoEntregado] = Field(default_factory=list)
+    propuesta: Propuesta | None = None
+    destinos: Destinos = Field(default_factory=Destinos)
+
+
+def _destinos(config, curso: str, numero: int) -> Destinos:
+    leido = datos_curso(config, curso)
+    datos_guion = leido[2].get(numero) if leido is not None else None
+    if datos_guion is None:
+        return Destinos()
+    guion = datos_guion[2]
+    identificador_guion = datos_guion[3].stem
+    entregados: set[str] = set()
+    try:
+        shorts = _leer_json(
+            ruta_segura(
+                config.estudio_dir,
+                "shorts",
+                f"l{numero}",
+                "shorts.json",
+            )
+        )
+    except ValueError:
+        shorts = None
+    if shorts is not None and shorts.get("leccion") == identificador_guion:
+        ganchos_entregados = shorts.get("ganchosEntregados")
+        if isinstance(ganchos_entregados, dict):
+            entregados = {
+                identificador
+                for identificador in ganchos_entregados
+                if isinstance(identificador, str)
+            }
+
+    camara: list[DestinoCamara] = []
+    escenas = guion.get("escenas")
+    if isinstance(escenas, list):
+        for escena in escenas:
+            if not isinstance(escena, dict) or escena.get("modo") != "camara":
+                continue
+            identificador = escena.get("id")
+            if (
+                not isinstance(identificador, str)
+                or PATRON_ESCENA_CAMARA.fullmatch(identificador) is None
+            ):
+                continue
+            titulo = escena.get("titulo")
+            camara.append(
+                DestinoCamara(
+                    id=identificador,
+                    titulo=titulo if isinstance(titulo, str) else identificador,
+                    tiene_toma="toma" in escena,
+                )
+            )
+
+    ganchos: list[DestinoGancho] = []
+    datos_ganchos = guion.get("ganchos")
+    if isinstance(datos_ganchos, list):
+        for gancho in datos_ganchos:
+            if not isinstance(gancho, dict):
+                continue
+            identificador = gancho.get("id")
+            if not isinstance(identificador, str):
+                continue
+            titulo = gancho.get("titulo")
+            if not isinstance(titulo, str):
+                titulo = gancho.get("texto")
+            ganchos.append(
+                DestinoGancho(
+                    id=identificador,
+                    titulo=titulo if isinstance(titulo, str) else identificador,
+                    entregado=identificador in entregados,
+                )
+            )
+    return Destinos(camara=camara, ganchos=ganchos)
+
+
 def _error_nombre() -> HTTPException:
     return HTTPException(status_code=422, detail=NOMBRE_NO_ADMITIDO)
 
 
 @router.get(
     "/cursos/{curso}/lecciones/{numero}/entregas",
-    response_model=list[ArchivoEntregado],
+    response_model=Entregas,
 )
 def obtener_entregas(
     request: Request,
     curso: CursoId,
     numero: NumeroLeccion,
-) -> list[ArchivoEntregado]:
+) -> Entregas:
+    config = config_peticion(request)
     try:
-        entregas = listar_entregas(config_peticion(request), curso, numero)
+        entregas = listar_entregas(config, curso, numero)
+        propuesta = leer_propuesta(config, curso, numero)
+        destinos = _destinos(config, curso, numero)
     except OSError as error:
         raise HTTPException(
             status_code=503,
@@ -46,7 +147,7 @@ def obtener_entregas(
         ) from error
     if entregas is None:
         raise HTTPException(status_code=404, detail="La lección no existe")
-    return entregas
+    return Entregas(archivos=entregas, propuesta=propuesta, destinos=destinos)
 
 
 @router.put(

@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import logging
 import shutil
 from types import SimpleNamespace
@@ -63,7 +64,13 @@ def test_subir_mov_de_tres_mb_y_listarlo(entregas):
     assert respuesta.json() == {"archivo": "IMG_1234.MOV", "bytes": len(cuerpo)}
     assert destino.read_bytes() == cuerpo
     assert listado.status_code == 200
-    assert listado.json() == [{"archivo": "IMG_1234.MOV", "bytes": len(cuerpo)}]
+    assert listado.json()["archivos"] == [
+        {"archivo": "IMG_1234.MOV", "bytes": len(cuerpo)}
+    ]
+    assert listado.json()["propuesta"] is None
+    assert listado.json()["destinos"]["camara"] == [
+        {"id": "E01", "titulo": "Presentación", "tiene_toma": False}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -523,10 +530,44 @@ def test_listado_solo_incluye_videos_validos_ordenados(entregas):
     respuesta = cliente.get(RUTA_ENTREGAS)
 
     assert respuesta.status_code == 200
-    assert respuesta.json() == [
+    assert respuesta.json()["archivos"] == [
         {"archivo": "A.mov", "bytes": 2},
         {"archivo": "z.MP4", "bytes": 1},
     ]
+
+
+def test_listado_incluye_destinos_y_estado_de_ganchos(entregas):
+    config, cliente, _ = entregas
+    guion_ruta = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(guion_ruta.read_text(encoding="utf-8"))
+    guion["escenas"][0]["toma"] = {"original": "grabaciones/videos/toma.mov"}
+    guion["ganchos"] = [
+        {"id": "g1", "titulo": "Gancho uno", "texto": "Texto ficticio."},
+        {"id": "g2", "texto": "Gancho dos ficticio."},
+    ]
+    guion_ruta.write_text(json.dumps(guion), encoding="utf-8")
+    shorts = config.estudio_dir / "shorts" / "l4" / "shorts.json"
+    shorts.parent.mkdir(parents=True)
+    shorts.write_text(
+        json.dumps(
+            {
+                "leccion": "react-04",
+                "ganchosEntregados": {"g1": "12345678"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente.get(RUTA_ENTREGAS)
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["destinos"] == {
+        "camara": [{"id": "E01", "titulo": "Presentación", "tiene_toma": True}],
+        "ganchos": [
+            {"id": "g1", "titulo": "Gancho uno", "entregado": True},
+            {"id": "g2", "titulo": "Gancho dos ficticio.", "entregado": False},
+        ],
+    }
 
 
 def test_leccion_inexistente_da_404_en_las_tres_rutas(entregas):
