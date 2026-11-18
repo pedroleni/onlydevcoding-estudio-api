@@ -340,7 +340,7 @@ def test_post_lanza_el_trabajo_y_coloca_la_previa(teleprompter, monkeypatch):
     config, cliente, _, _, _, ruta_previa = teleprompter
     ruta_previa.unlink()
 
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
 
     def comando_falso(_npx, temporal, _guion):
         return [
@@ -350,7 +350,7 @@ def test_post_lanza_el_trabajo_y_coloca_la_previa(teleprompter, monkeypatch):
             str(temporal),
         ]
 
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.comando_previa", comando_falso)
+    monkeypatch.setattr("estudio_api.acciones.comando_previa", comando_falso)
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
@@ -369,21 +369,21 @@ def test_post_previa_usa_sus_mensajes_para_un_codigo_de_salida_3(
     teleprompter, monkeypatch
 ):
     config, cliente, _, _, _, _ = teleprompter
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
     monkeypatch.setattr(
-        "estudio_api.rutas_teleprompter.comando_previa",
+        "estudio_api.acciones.comando_previa",
         lambda *_: [sys.executable, "-c", "raise SystemExit(3)"],
     )
-    from estudio_api import rutas_teleprompter
+    from estudio_api import rutas_acciones
 
-    lanzar_real = rutas_teleprompter.lanzar
+    lanzar_real = rutas_acciones.lanzar
     planes = []
 
     def lanzar_capturando(bd_ruta, curso, numero, plan):
         planes.append(plan)
         return lanzar_real(bd_ruta, curso, numero, plan)
 
-    monkeypatch.setattr(rutas_teleprompter, "lanzar", lanzar_capturando)
+    monkeypatch.setattr(rutas_acciones, "lanzar", lanzar_capturando)
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
@@ -402,7 +402,7 @@ def test_post_previa_usa_sus_mensajes_para_un_codigo_de_salida_3(
 def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):
     config, cliente, _, _, _, _ = teleprompter
     continuar = config.estudio_dir / "continuar-render"
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
 
     def comando_lento(_npx, temporal, _guion):
         return [
@@ -419,7 +419,7 @@ def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):
             str(temporal),
         ]
 
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.comando_previa", comando_lento)
+    monkeypatch.setattr("estudio_api.acciones.comando_previa", comando_lento)
     primero = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
     try:
         segundo = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
@@ -435,7 +435,7 @@ def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):
 
 def test_post_sin_npx_devuelve_503(teleprompter, monkeypatch):
     _, cliente, _, _, _, _ = teleprompter
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: None)
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: None)
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
@@ -446,7 +446,7 @@ def test_post_sin_npx_devuelve_503(teleprompter, monkeypatch):
 def test_post_sin_montaje_devuelve_409(teleprompter, monkeypatch):
     _, cliente, _, _, ruta_montaje, _ = teleprompter
     ruta_montaje.unlink()
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
@@ -456,8 +456,8 @@ def test_post_sin_montaje_devuelve_409(teleprompter, monkeypatch):
 
 def test_post_con_ruta_de_previa_invalida_devuelve_404(teleprompter, monkeypatch):
     _, cliente, _, _, _, _ = teleprompter
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.rutas_previa", lambda *_: None)
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.rutas_previa", lambda *_: None)
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
 
@@ -473,7 +473,7 @@ def test_post_si_no_puede_preparar_la_carpeta_devuelve_503(teleprompter, monkeyp
             raise OSError("fallo de disco ficticio")
         return mkdir_real(ruta, *args, **kwargs)
 
-    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/npx")
     monkeypatch.setattr(Path, "mkdir", mkdir_con_fallo)
 
     respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})

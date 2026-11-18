@@ -1,6 +1,5 @@
 import hashlib
 import json
-import shutil
 import threading
 from contextlib import closing
 from typing import Annotated, cast
@@ -9,18 +8,17 @@ from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import BaseModel, ConfigDict
 from starlette.requests import ClientDisconnect
 
+from estudio_api.acciones import AccionNoDisponible, OpcionesAccion, plan_accion
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
 from estudio_api.escritura import escribir_atomico
 from estudio_api.guion_textos import CambiosTextos, aplicar_textos
 from estudio_api.lectura import datos_curso
+from estudio_api.rutas_acciones import lanzar_plan
 from estudio_api.rutas_api import CursoId, NumeroLeccion
 from estudio_api.teleprompter import (
     Teleprompter,
-    comando_previa,
     leer_teleprompter,
-    ruta_montaje,
-    rutas_previa,
 )
 from estudio_api.tomas import (
     EscenaNoEsVoz,
@@ -30,14 +28,7 @@ from estudio_api.tomas import (
     WavInvalido,
     guardar_toma,
 )
-from estudio_api.trabajos import (
-    MENSAJES_PREVIA,
-    PlanTrabajo,
-    Trabajo,
-    TrabajoEnMarcha,
-    lanzar,
-    leer_trabajo,
-)
+from estudio_api.trabajos import Trabajo, leer_trabajo
 
 router = APIRouter(prefix="/api")
 _BLOQUEO_TEXTOS = threading.Lock()
@@ -187,55 +178,20 @@ def generar_previa_grabacion(
     numero: NumeroLeccion,
 ) -> Trabajo:
     config = _config(request)
-    with closing(abrir_bd(config.bd_ruta)) as bd:
-        teleprompter = leer_teleprompter(config, bd, curso, numero)
-    if teleprompter is None:
-        raise HTTPException(status_code=404, detail="La lección no existe")
-
-    montaje = ruta_montaje(config, teleprompter.guion)
-    if montaje is None or not montaje.is_file() or teleprompter.montaje is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Esta lección aún no tiene montaje",
-        )
-    npx = shutil.which("npx")
-    if npx is None:
-        raise HTTPException(
-            status_code=503,
-            detail="No se encuentra npx en el PATH de la API",
-        )
-    rutas = rutas_previa(config, teleprompter.guion)
-    if rutas is None:
-        raise HTTPException(status_code=404, detail="La ruta de la previa no es válida")
-    temporal, destino = rutas
     try:
-        destino.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise HTTPException(
-            status_code=503,
-            detail="No se puede preparar la carpeta de la vista previa",
-        ) from error
-    try:
-        return lanzar(
-            config.bd_ruta,
+        plan = plan_accion(
+            config,
             curso,
             numero,
-            PlanTrabajo(
-                accion="previa-grabacion",
-                objetivo=None,
-                comando=comando_previa(npx, temporal, teleprompter.guion),
-                cwd=config.estudio_dir,
-                temporal=temporal,
-                destino=destino,
-                instalar="reemplazar",
-                mensajes=MENSAJES_PREVIA,
-            ),
+            "previa-grabacion",
+            OpcionesAccion(),
         )
-    except TrabajoEnMarcha as error:
+    except AccionNoDisponible as error:
         raise HTTPException(
-            status_code=409,
-            detail="Ya hay un trabajo en marcha",
+            status_code=error.estado_http,
+            detail=error.mensaje,
         ) from error
+    return lanzar_plan(config, curso, numero, plan)
 
 
 @router.get("/trabajos/{id}", response_model=Trabajo)

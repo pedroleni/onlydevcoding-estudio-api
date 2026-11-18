@@ -771,6 +771,17 @@ def leer_leccion(
         piezas,
         bd,
     )
+    montaje = None
+    if numero in guiones:
+        # Importación local: acciones consume las primitivas de lectura para
+        # construir el catálogo y no debe crear un ciclo al cargar el módulo.
+        from estudio_api.acciones import estado_montaje
+
+        montaje = estado_montaje(
+            config,
+            identificador_guion,
+            carpeta_de_trabajo(leido, numero),
+        )
     return Leccion(
         curso=curso,
         numero=numero,
@@ -792,4 +803,5 @@ def leer_leccion(
         piezas=piezas,
         previas=_previas(config, carpeta),
         duracion_s=duracion,
+        montaje=montaje,
     )

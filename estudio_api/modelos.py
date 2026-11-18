@@ -105,12 +105,23 @@ class LeccionResumen(BaseModel):
     estado: EstadoLeccion = Field(default_factory=EstadoLeccion)
 
 
+class EstadoMontaje(BaseModel):
+    estado: Literal[
+        "sin_montaje",
+        "voz_sin_alinear",
+        "guion_cambiado",
+        "al_dia",
+    ]
+    sin_alinear: list[str] = Field(default_factory=list)
+
+
 class Leccion(LeccionResumen):
     subtitulo: str = ""
     escenas: list[Escena] = Field(default_factory=list)
     piezas: list[Pieza] = Field(default_factory=list)
     previas: list[str] = Field(default_factory=list)
     duracion_s: float | None = None
+    montaje: EstadoMontaje | None = None
 
 
 class Curso(BaseModel):
