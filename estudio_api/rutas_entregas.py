@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import ClientDisconnect
 
+from estudio_api.camara import TomasCamara, leer_camara
 from estudio_api.colocar import (
     Asignacion,
     ColocacionNoValida,
@@ -170,6 +171,27 @@ def obtener_entregas(
     if entregas is None:
         raise HTTPException(status_code=404, detail="La lección no existe")
     return Entregas(archivos=entregas, propuesta=propuesta, destinos=destinos)
+
+
+@router.get(
+    "/cursos/{curso}/lecciones/{numero}/camara",
+    response_model=TomasCamara,
+)
+def obtener_camara(
+    request: Request,
+    curso: CursoId,
+    numero: NumeroLeccion,
+) -> TomasCamara:
+    try:
+        camara = leer_camara(config_peticion(request), curso, numero)
+    except OSError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="No se han podido leer las tomas de la lección",
+        ) from error
+    if camara is None:
+        raise HTTPException(status_code=404, detail="La lección no existe")
+    return camara
 
 
 @router.post(
