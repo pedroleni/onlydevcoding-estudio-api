@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,12 +17,20 @@ import estudio_api.trabajos as modulo_trabajos
 from estudio_api.app import crear_app
 from estudio_api.decisiones import abrir_bd
 from estudio_api.trabajos import (
+    MENSAJES_HERRAMIENTA,
+    MENSAJES_PREVIA,
+    PROGRESO_HERRAMIENTA,
+    PlanTrabajo,
     TrabajoEnMarcha,
+    cancelar,
     esperar,
     interrumpir_huerfanos,
-    lanzar,
     leer_trabajo,
+    listar_trabajos,
     ultimo_trabajo,
+)
+from estudio_api.trabajos import (
+    lanzar as lanzar_plan,
 )
 
 
@@ -39,6 +48,32 @@ def _leer(ruta_bd, trabajo_id):
         trabajo = leer_trabajo(bd, trabajo_id)
     assert trabajo is not None
     return trabajo
+
+
+def lanzar(ruta_bd, *args, tiempo_maximo=None):
+    """Adapta los casos de regresión de fase 4 al único contrato con plan."""
+    if len(args) == 3 and isinstance(args[2], PlanTrabajo):
+        assert tiempo_maximo is None
+        return lanzar_plan(ruta_bd, *args)
+    accion, curso, numero, comando, cwd, temporal, destino = args
+    parametros = {}
+    if tiempo_maximo is not None:
+        parametros["tiempo_maximo"] = tiempo_maximo
+    return lanzar_plan(
+        ruta_bd,
+        curso,
+        numero,
+        PlanTrabajo(
+            accion=accion,
+            objetivo=None,
+            comando=comando,
+            cwd=cwd,
+            temporal=temporal,
+            destino=destino,
+            mensajes=MENSAJES_PREVIA,
+            **parametros,
+        ),
+    )
 
 
 def test_trabajo_termina_bien_y_mueve_el_temporal(tmp_path):
@@ -645,12 +680,12 @@ def test_esquema_trabajo_tiene_los_valores_por_defecto(tmp_path):
         )
         bd.commit()
         fila = bd.execute(
-            "SELECT progreso, registro, curso, numero, fin, error, temporal "
+            "SELECT progreso, registro, curso, numero, fin, error, temporal, objetivo "
             "FROM trabajo WHERE id = ?",
             (cursor.lastrowid,),
         ).fetchone()
 
-    assert fila == (0.0, "[]", None, None, None, None, None)
+    assert fila == (0.0, "[]", None, None, None, None, None, None)
 
 
 # --- Ronda final de la fase 4: timeout, apagado, errores sin rutas y entorno ---
@@ -659,6 +694,23 @@ _HIJO_CON_NIETO = (
     "import os, pathlib, subprocess, sys, time\n"
     "pathlib.Path(sys.argv[2]).write_text('a medias')\n"
     "nieto = subprocess.Popen(['sleep', '60'])\n"
+    "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {nieto.pid}')\n"
+    "time.sleep(60)\n"
+)
+
+_HIJO_CON_NIETO_RESISTENTE = (
+    "import os, pathlib, subprocess, sys, time\n"
+    'codigo = ("import pathlib,signal,sys,time\\n"\n'
+    '          "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"\n'
+    '          "temporal=pathlib.Path(sys.argv[1])\\n"\n'
+    "          \"pathlib.Path(sys.argv[2]).write_text('listo')\\n\"\n"
+    '          "while True:\\n"\n'
+    "          \" temporal.write_text('a medias')\\n\"\n"
+    '          " time.sleep(.02)\\n")\n'
+    "nieto = subprocess.Popen([sys.executable, '-c', codigo, sys.argv[2], "
+    "sys.argv[3]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "listo = pathlib.Path(sys.argv[3])\n"
+    "while not listo.exists(): time.sleep(.01)\n"
     "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {nieto.pid}')\n"
     "time.sleep(60)\n"
 )
@@ -766,9 +818,7 @@ def test_apagar_la_api_mata_el_render_y_lo_marca_interrumpido(cfg):
         assert _esperar_que_mueran(pids)
         interrumpido = _leer(cfg.bd_ruta, trabajo.id)
         assert interrumpido.estado == "interrumpido"
-        assert interrumpido.error == (
-            "La vista previa se ha interrumpido al cerrar la API"
-        )
+        assert interrumpido.error == "El trabajo se ha interrumpido al cerrar la API"
         assert interrumpido.fin is not None
         assert not temporal.exists()
         assert not (cfg.estudio_dir / "salida.mp4").exists()
@@ -958,3 +1008,768 @@ def test_reciclar_una_fila_sin_hilo_borra_su_temporal(tmp_path):
     assert _leer(ruta_bd, huerfano).estado == "interrumpido"
     assert not temporal.exists()
     assert _leer(ruta_bd, nuevo.id).estado == "hecho"
+
+
+# --- Fase 5: planes, instalaciones, cancelación y listado ---
+
+
+def test_plan_de_herramienta_solo_acepta_su_progreso(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    plan = PlanTrabajo(
+        accion="herramienta",
+        objetivo="escenas",
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "print('procesando 3/9 escenas'); "
+                "print('  PROGRESO 1/4  '); "
+                "print('PROGRESO 2/4')"
+            ),
+        ],
+        cwd=tmp_path,
+        patron_progreso=PROGRESO_HERRAMIENTA,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "hecho"
+    assert terminado.objetivo == "escenas"
+    assert terminado.progreso == 0.5
+
+
+def test_plan_combina_entorno_minimo_con_su_entorno(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETO", "no-debe-llegar")
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    salida = tmp_path / "entorno.json"
+    plan = PlanTrabajo(
+        accion="entorno",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            "import json,os,sys; open(sys.argv[1],'w').write(json.dumps(dict(os.environ)))",
+            str(salida),
+        ],
+        cwd=tmp_path,
+        entorno={"CURSOS_DIR": "/cursos-ficticios"},
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    entorno = json.loads(salida.read_text())
+    assert entorno["CURSOS_DIR"] == "/cursos-ficticios"
+    assert "SECRETO" not in entorno
+
+
+def test_archivar_conserva_el_anterior_e_instala_el_nuevo(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"anterior")
+    plan = PlanTrabajo(
+        accion="video-final",
+        objetivo="previa-v1.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert destino.read_bytes() == b"nuevo"
+    anteriores = list((tmp_path / "anteriores").glob("video-*.mp4"))
+    assert len(anteriores) == 1
+    assert anteriores[0].read_bytes() == b"anterior"
+
+
+def test_archivar_dos_veces_con_la_misma_marca_no_pisa(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        modulo_trabajos, "_marca_archivo", lambda: "20261118T120000123456"
+    )
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"primero")
+
+    def lanzar_archivado(contenido):
+        temporal = tmp_path / ".video.generando.mp4"
+        plan = PlanTrabajo(
+            accion="video-final",
+            objetivo=None,
+            comando=[
+                sys.executable,
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(sys.argv[2].encode())",
+                str(temporal),
+                contenido,
+            ],
+            cwd=tmp_path,
+            temporal=temporal,
+            destino=destino,
+            instalar="archivar",
+        )
+        trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+        esperar(trabajo.id, 5)
+        assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+
+    lanzar_archivado("segundo")
+    lanzar_archivado("tercero")
+
+    anteriores = sorted((tmp_path / "anteriores").glob("video-*.mp4"))
+    assert [ruta.name for ruta in anteriores] == [
+        "video-20261118T120000123456-2.mp4",
+        "video-20261118T120000123456.mp4",
+    ]
+    assert {ruta.read_bytes() for ruta in anteriores} == {b"primero", b"segundo"}
+    assert destino.read_bytes() == b"tercero"
+
+
+def test_archivar_restaura_el_anterior_si_falla_la_instalacion(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"anterior")
+    reemplazar_real = os.replace
+
+    def reemplazar_con_fallo(origen, final):
+        if os.fspath(origen) == os.fspath(temporal) and os.fspath(final) == os.fspath(
+            destino
+        ):
+            raise OSError("fallo forzado")
+        reemplazar_real(origen, final)
+
+    monkeypatch.setattr(modulo_trabajos.os, "replace", reemplazar_con_fallo)
+    plan = PlanTrabajo(
+        accion="video-final",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"anterior"
+    assert not temporal.exists()
+    assert not list((tmp_path / "anteriores").glob("video-*.mp4"))
+
+
+def test_archivar_con_anteriores_como_archivo_usa_el_error_de_guardado(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"anterior")
+    (tmp_path / "anteriores").write_bytes(b"no es un directorio")
+    plan = PlanTrabajo(
+        accion="video-final",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"anterior"
+    assert not temporal.exists()
+
+
+def test_sin_pisar_no_cambia_un_destino_que_aparece_mientras_corre(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v2.generando.mp4"
+    destino = tmp_path / "previa-v2.mp4"
+    continuar = tmp_path / "continuar"
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo="previa-v2.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time\n"
+                "pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')\n"
+                "p=pathlib.Path(sys.argv[2])\n"
+                "while not p.exists(): time.sleep(.01)\n"
+            ),
+            str(temporal),
+            str(continuar),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="sin_pisar",
+    )
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    limite = time.monotonic() + 5
+    while not temporal.exists() and time.monotonic() < limite:
+        time.sleep(0.01)
+    destino.write_bytes(b"aparecido")
+    continuar.touch()
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == (
+        "Ya existe una versión con ese número; vuelve a lanzarlo"
+    )
+    assert destino.read_bytes() == b"aparecido"
+    assert not temporal.exists()
+
+
+def test_sin_pisar_si_falla_borrar_temporal_conserva_el_resultado(
+    tmp_path, monkeypatch, caplog
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v2.generando.mp4"
+    destino = tmp_path / "previa-v2.mp4"
+    unlink_real = Path.unlink
+
+    def unlink_con_fallo(ruta, *args, **kwargs):
+        if ruta == temporal:
+            raise OSError("fallo de borrado ficticio")
+        return unlink_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_con_fallo)
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo="previa-v2.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="sin_pisar",
+    )
+
+    with caplog.at_level(logging.ERROR):
+        trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+        esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "hecho"
+    assert terminado.error is None
+    assert destino.read_bytes() == b"nuevo"
+    assert temporal.exists()
+    assert "No se pudo borrar el temporal del trabajo" in caplog.text
+
+
+def test_cancelar_espera_al_grupo_antes_de_borrar_y_liberar_motor(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(modulo_trabajos, "_GRACIA_TERMINAR", 0.6)
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v1.generando.mp4"
+    destino = tmp_path / "previa-v1.mp4"
+    pids_ruta = tmp_path / "pids"
+    listo = tmp_path / "nieto-listo"
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo="previa-v1.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            _HIJO_CON_NIETO_RESISTENTE,
+            str(pids_ruta),
+            str(temporal),
+            str(listo),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="sin_pisar",
+    )
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    pids = _esperar_pids(pids_ruta)
+    resultado_cancelar = []
+
+    def cancelar_en_hilo():
+        resultado_cancelar.append(cancelar(ruta_bd, trabajo.id))
+
+    hilo_cancelar = threading.Thread(target=cancelar_en_hilo)
+    hilo_cancelar.start()
+    siguiente = None
+    try:
+        limite = time.monotonic() + 5
+        while siguiente is None and time.monotonic() < limite:
+            try:
+                siguiente = lanzar(
+                    ruta_bd,
+                    None,
+                    None,
+                    PlanTrabajo(
+                        accion="siguiente",
+                        objetivo=None,
+                        comando=[sys.executable, "-c", "pass"],
+                        cwd=tmp_path,
+                    ),
+                )
+            except TrabajoEnMarcha:
+                time.sleep(0.02)
+                continue
+            assert not any(_vivo(pid) for pid in pids)
+
+        hilo_cancelar.join(5)
+        assert not hilo_cancelar.is_alive()
+        assert len(resultado_cancelar) == 1
+        cancelado = resultado_cancelar[0]
+        assert cancelado is not None
+        assert cancelado.estado == "cancelado"
+        assert cancelado.error == "Cancelado"
+        assert _esperar_que_mueran(pids)
+        assert not temporal.exists()
+        assert not destino.exists()
+        assert siguiente is not None
+        esperar(siguiente.id, 5)
+        assert _leer(ruta_bd, siguiente.id).estado == "hecho"
+    finally:
+        hilo_cancelar.join(2)
+        _matar_si_quedan(pids)
+
+
+def test_excepcion_inesperada_despues_de_cancelar_conserva_cancelado(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(modulo_trabajos, "_GRACIA_TERMINAR", 0.2)
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / "salida.generando"
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time; "
+                "pathlib.Path(sys.argv[1]).write_text('parcial'); time.sleep(60)"
+            ),
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=tmp_path / "salida.mp4",
+    )
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    limite = time.monotonic() + 5
+    while not temporal.exists() and time.monotonic() < limite:
+        time.sleep(0.01)
+    borrar_real = modulo_trabajos._borrar_temporal_sin_fallar
+    llamadas = 0
+
+    def borrar_con_fallo(ruta, trabajo_id):
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            raise RuntimeError("fallo inesperado ficticio")
+        borrar_real(ruta, trabajo_id)
+
+    monkeypatch.setattr(
+        modulo_trabajos, "_borrar_temporal_sin_fallar", borrar_con_fallo
+    )
+
+    cancelado = cancelar(ruta_bd, trabajo.id)
+
+    assert cancelado is not None
+    assert cancelado.estado == "cancelado"
+    assert cancelado.error == "Cancelado"
+    assert llamadas >= 2
+    assert not temporal.exists()
+
+
+def test_cancelar_antes_de_arrancar_no_lanza_el_proceso(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    entrada = threading.Event()
+    continuar = threading.Event()
+    ejecutar_real = modulo_trabajos._ejecutar
+
+    def ejecutar_demorado(*args):
+        entrada.set()
+        continuar.wait(5)
+        ejecutar_real(*args)
+
+    def popen_prohibido(*args, **kwargs):
+        raise AssertionError("No debía arrancar el proceso")
+
+    monkeypatch.setattr(modulo_trabajos, "_ejecutar", ejecutar_demorado)
+    monkeypatch.setattr(modulo_trabajos.subprocess, "Popen", popen_prohibido)
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="demorado",
+            objetivo=None,
+            comando=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+        ),
+    )
+    assert entrada.wait(5)
+    resultado = []
+    hilo_cancelar = threading.Thread(
+        target=lambda: resultado.append(cancelar(ruta_bd, trabajo.id))
+    )
+    hilo_cancelar.start()
+    limite = time.monotonic() + 5
+    while time.monotonic() < limite:
+        with modulo_trabajos._BLOQUEO:
+            en_curso = modulo_trabajos._EN_CURSO.get(trabajo.id)
+        if en_curso is not None and en_curso.motivo == "cancelado":
+            break
+        time.sleep(0.01)
+    continuar.set()
+    hilo_cancelar.join(5)
+
+    assert len(resultado) == 1
+    assert resultado[0] is not None
+    assert resultado[0].estado == "cancelado"
+
+
+def test_cancelar_tras_el_plazo_devuelve_el_estado_actual_de_la_bd(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    entrada = threading.Event()
+    continuar = threading.Event()
+    ejecutar_real = modulo_trabajos._ejecutar
+    monotonic_real = modulo_trabajos.monotonic
+
+    def ejecutar_demorado(*args):
+        entrada.set()
+        continuar.wait(5)
+        ejecutar_real(*args)
+
+    instantes = iter((0.0, 16.0))
+    monkeypatch.setattr(modulo_trabajos, "_ejecutar", ejecutar_demorado)
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="demorado",
+            objetivo=None,
+            comando=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+        ),
+    )
+    assert entrada.wait(5)
+    monkeypatch.setattr(modulo_trabajos, "monotonic", lambda: next(instantes))
+    try:
+        actual = cancelar(ruta_bd, trabajo.id)
+    finally:
+        monkeypatch.setattr(modulo_trabajos, "monotonic", monotonic_real)
+        continuar.set()
+        esperar(trabajo.id, 5)
+
+    assert actual is not None
+    assert actual.estado == "en_marcha"
+
+
+def test_cancelar_un_trabajo_terminado_devuelve_none(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="rapido",
+            objetivo=None,
+            comando=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+        ),
+    )
+    esperar(trabajo.id, 5)
+
+    assert cancelar(ruta_bd, trabajo.id) is None
+
+
+def test_mensaje_de_codigo_de_herramienta(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="herramienta",
+            objetivo=None,
+            comando=[sys.executable, "-c", "raise SystemExit(3)"],
+            cwd=tmp_path,
+            mensajes=MENSAJES_HERRAMIENTA,
+        ),
+    )
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).error == "La herramienta terminó con el código 3"
+
+
+def test_huerfano_usa_el_mensaje_comun_de_api_cerrada(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    with closing(abrir_bd(ruta_bd)) as bd:
+        cursor = bd.execute(
+            "INSERT INTO trabajo (accion, estado, inicio) VALUES (?, 'en_marcha', ?)",
+            ("herramienta", datetime.now().astimezone().isoformat()),
+        )
+        bd.commit()
+        assert interrumpir_huerfanos(bd) == 1
+        trabajo = leer_trabajo(bd, cursor.lastrowid)
+
+    assert trabajo is not None
+    assert trabajo.error == "El trabajo se ha interrumpido al cerrar la API"
+
+
+def test_listar_trabajos_devuelve_los_ultimos_en_orden_descendente(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    with closing(abrir_bd(ruta_bd)) as bd:
+        bd.executemany(
+            "INSERT INTO trabajo (accion, estado, inicio) VALUES (?, 'hecho', ?)",
+            [
+                (f"accion-{indice}", datetime.now().astimezone().isoformat())
+                for indice in range(25)
+            ],
+        )
+        bd.commit()
+        trabajos = listar_trabajos(bd, 20)
+
+    assert len(trabajos) == 20
+    assert [trabajo.id for trabajo in trabajos] == list(range(25, 5, -1))
+
+
+def test_ultimo_trabajo_filtra_por_objetivo(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(ruta_bd)) as bd:
+        bd.executemany(
+            """
+            INSERT INTO trabajo
+                (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('render-short', 'curso-prueba', 2, ?, 'hecho', ?)
+            """,
+            [("short-a", inicio), ("short-b", inicio)],
+        )
+        bd.commit()
+
+        primero = ultimo_trabajo(
+            bd, "render-short", "curso-prueba", 2, objetivo="short-a"
+        )
+        segundo = ultimo_trabajo(
+            bd, "render-short", "curso-prueba", 2, objetivo="short-b"
+        )
+        sin_objetivo = ultimo_trabajo(bd, "render-short", "curso-prueba", 2)
+
+    assert primero is not None and primero.objetivo == "short-a"
+    assert segundo is not None and segundo.objetivo == "short-b"
+    assert sin_objetivo is None
+
+
+# --- Ronda final: instalación sin enlaces simbólicos (M1 de la auditoría) ---
+
+_ESCRIBIR_TEMPORAL = (
+    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')"
+)
+_ENLAZAR_TEMPORAL = "import os,sys; os.symlink(sys.argv[2], sys.argv[1])"
+
+
+def _plan_instalacion(tmp_path, instalar, comando, temporal, destino):
+    return PlanTrabajo(
+        accion="instalacion",
+        objetivo=None,
+        comando=[sys.executable, "-c", *comando],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar=instalar,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+
+@pytest.mark.parametrize("instalar", ["reemplazar", "sin_pisar", "archivar"])
+def test_instalar_rechaza_un_temporal_que_es_un_enlace(tmp_path, instalar):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "fuera.txt"
+    fuera.write_bytes(b"archivo ajeno")
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    if instalar == "archivar":
+        destino.write_bytes(b"anterior")
+    plan = _plan_instalacion(
+        tmp_path,
+        instalar,
+        [_ENLAZAR_TEMPORAL, str(temporal), str(fuera)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert fuera.read_bytes() == b"archivo ajeno"
+    assert not os.path.lexists(temporal)
+    if instalar == "archivar":
+        assert destino.read_bytes() == b"anterior"
+        assert not (carpeta / "anteriores").exists()
+    else:
+        assert not os.path.lexists(destino)
+
+
+@pytest.mark.parametrize("instalar", ["reemplazar", "sin_pisar", "archivar"])
+def test_instalar_rechaza_un_destino_que_es_un_enlace(tmp_path, instalar):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "fuera.txt"
+    fuera.write_bytes(b"archivo ajeno")
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    destino.symlink_to(fuera)
+    plan = _plan_instalacion(
+        tmp_path,
+        instalar,
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert fuera.read_bytes() == b"archivo ajeno"
+    assert destino.is_symlink()
+    assert not temporal.exists()
+    assert not (carpeta / "anteriores").exists()
+
+
+def test_archivar_rechaza_anteriores_enlazado_fuera_sin_mover_nada(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "carpeta-ajena"
+    fuera.mkdir()
+    (carpeta / "anteriores").symlink_to(fuera, target_is_directory=True)
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    destino.write_bytes(b"anterior")
+    plan = _plan_instalacion(
+        tmp_path,
+        "archivar",
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"anterior"
+    assert list(fuera.iterdir()) == []
+    assert not temporal.exists()
+
+
+def test_sin_pisar_enlaza_sin_seguir_enlaces(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v1.generando.mp4"
+    destino = tmp_path / "previa-v1.mp4"
+    llamadas = []
+    enlazar_real = os.link
+
+    def enlazar_espiando(origen, final, **kwargs):
+        llamadas.append(kwargs)
+        return enlazar_real(origen, final, **kwargs)
+
+    monkeypatch.setattr(modulo_trabajos.os, "link", enlazar_espiando)
+    plan = _plan_instalacion(
+        tmp_path,
+        "sin_pisar",
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert destino.read_bytes() == b"nuevo"
+    assert llamadas == [{"follow_symlinks": False}]
+
+
+def test_codigo_de_salida_con_fallo_al_borrar_temporal_conserva_su_mensaje(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    unlink_real = Path.unlink
+
+    def unlink_con_fallo(ruta, *args, **kwargs):
+        if ruta == temporal:
+            raise OSError("fallo de borrado ficticio")
+        return unlink_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_con_fallo)
+    plan = _plan_instalacion(
+        tmp_path,
+        "archivar",
+        [
+            (
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'x'); "
+                "raise SystemExit(3)"
+            ),
+            str(temporal),
+        ],
+        temporal,
+        tmp_path / "video.mp4",
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "La herramienta terminó con el código 3"

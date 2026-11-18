@@ -2,7 +2,7 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from datetime import date
-from typing import Annotated, cast
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Request, status
 from pydantic import BaseModel, ConfigDict, StrictBool
@@ -16,6 +16,7 @@ from estudio_api.lectura import (
     leer_leccion,
     leer_lecciones,
 )
+from estudio_api.rutas_api import config_peticion
 from estudio_api.tareas import (
     DatosTipoTarea,
     EnlaceTarea,
@@ -53,10 +54,6 @@ class CambioHecha(BaseModel):
 
 class EdicionTipoTarea(DatosTipoTarea):
     pass
-
-
-def _config(request: Request) -> Config:
-    return cast(Config, request.app.state.config)
 
 
 def _tipo_existe(bd: sqlite3.Connection, identificador: str) -> bool:
@@ -170,7 +167,7 @@ def listar_tareas(
     if hasta < desde or (hasta - desde).days >= 62:
         raise HTTPException(status_code=422, detail="El rango de fechas no es válido")
 
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         del_rango = tareas_entre(bd, desde, hasta)
         anteriores = tareas_atrasadas(bd, desde) if atrasadas else []
@@ -185,7 +182,7 @@ def listar_tareas(
     status_code=status.HTTP_201_CREATED,
 )
 def alta_tarea(request: Request, nueva: TareaNueva) -> TareaVista:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         tarea = _guardar(config, bd, nueva, lambda: crear_tarea(bd, nueva))
         assert tarea is not None
@@ -198,7 +195,7 @@ def modificar_tarea(
     nueva: TareaNueva,
     id: TareaId,
 ) -> TareaVista:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         tarea = _guardar(config, bd, nueva, lambda: editar_tarea(bd, id, nueva))
         if tarea is None:
@@ -212,7 +209,7 @@ def cambiar_tarea_hecha(
     cambio: CambioHecha,
     id: TareaId,
 ) -> TareaVista:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         tarea = marcar_hecha(bd, id, cambio.hecha)
         if tarea is None:
@@ -222,7 +219,7 @@ def cambiar_tarea_hecha(
 
 @router.delete("/tareas/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_tarea(request: Request, id: TareaId) -> Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         borrada = borrar_tarea(bd, id)
     if not borrada:
@@ -232,7 +229,7 @@ def eliminar_tarea(request: Request, id: TareaId) -> Response:
 
 @router.get("/tipos-tarea", response_model=list[TipoTarea])
 def listar_tipos_tarea(request: Request) -> list[TipoTarea]:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         return tipos(bd)
 
@@ -243,7 +240,7 @@ def listar_tipos_tarea(request: Request) -> list[TipoTarea]:
     status_code=status.HTTP_201_CREATED,
 )
 def alta_tipo_tarea(request: Request, tipo: TipoTarea) -> TipoTarea:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         try:
             return crear_tipo(bd, tipo)
@@ -260,7 +257,7 @@ def modificar_tipo_tarea(
     cambios: EdicionTipoTarea,
     id: TipoId,
 ) -> TipoTarea:
-    config = _config(request)
+    config = config_peticion(request)
     tipo = TipoTarea(id=id, **cambios.model_dump())
     with closing(abrir_bd(config.bd_ruta)) as bd:
         editado = editar_tipo(bd, id, tipo)
@@ -271,7 +268,7 @@ def modificar_tipo_tarea(
 
 @router.delete("/tipos-tarea/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_tipo_tarea(request: Request, id: TipoId) -> Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         resultado = borrar_tipo(bd, id)
     if resultado == "no_existe":

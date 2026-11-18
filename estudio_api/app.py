@@ -6,6 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from estudio_api.config import Config, cargar_config
 from estudio_api.decisiones import abrir_bd
+from estudio_api.rutas_acciones import router as router_acciones
 from estudio_api.rutas_api import router as router_api
 from estudio_api.rutas_publicar import router as router_publicar
 from estudio_api.rutas_tareas import router as router_tareas
@@ -46,6 +47,7 @@ def crear_app(config: Config) -> FastAPI:
         token_escritura=config.token_escritura,
     )
     aplicacion.include_router(router_api)
+    aplicacion.include_router(router_acciones)
     aplicacion.include_router(router_publicar)
     aplicacion.include_router(router_tareas)
     aplicacion.include_router(router_teleprompter)

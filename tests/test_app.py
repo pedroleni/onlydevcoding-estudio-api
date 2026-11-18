@@ -61,7 +61,13 @@ def _estado_asgi(mensajes) -> int:
 
 @pytest.fixture
 def cliente(tmp_path):
-    config = Config(cursos_dir=tmp_path, estudio_dir=tmp_path)
+    # Con la ruta por defecto, la app abriría y migraría datos/estudio.sqlite3
+    # del repo: la base de datos real del autor.
+    config = Config(
+        cursos_dir=tmp_path,
+        estudio_dir=tmp_path,
+        bd_ruta=tmp_path / "estudio.sqlite3",
+    )
     return TestClient(
         crear_app(config),
         base_url="http://127.0.0.1:8000",

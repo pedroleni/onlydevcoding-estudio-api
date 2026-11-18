@@ -1,11 +1,47 @@
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
 
 from estudio_api.app import crear_app
 from estudio_api.config import Config
-from tests.ayudas import TOKEN
+from tests.ayudas import DATOS_REALES, TOKEN, conexion_vigilada
+
+
+def _huella_datos() -> dict[str, tuple[int, int]]:
+    if not DATOS_REALES.is_dir():
+        return {}
+    return {
+        ruta.name: (ruta.stat().st_size, ruta.stat().st_mtime_ns)
+        for ruta in DATOS_REALES.iterdir()
+        if ruta.is_file()
+    }
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _datos_reales_intactos():
+    """Falla la batería si algún test crea, cambia o borra algo en ``datos/``.
+
+    Ahí vive la base de datos real del autor: los tests usan siempre bases
+    temporales.
+    """
+    antes = _huella_datos()
+    yield
+    assert _huella_datos() == antes, (
+        "Un test ha tocado datos/ (la base de datos real del autor)"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _sin_abrir_datos_reales(monkeypatch):
+    """Falla al instante si un test intenta abrir una base de ``datos/``.
+
+    La guarda de sesión solo detecta el daño al final; esta lo evita: el
+    error salta antes de ``sqlite3.connect``, así que la base real ni se abre
+    ni se migra.
+    """
+    monkeypatch.setattr(sqlite3, "connect", conexion_vigilada(sqlite3.connect))
 
 
 @pytest.fixture

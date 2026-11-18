@@ -502,10 +502,12 @@ def _archivos_directos(
     directorio: Path,
     predicado: Callable[[str], bool],
 ) -> list[Path]:
+    # Los nombres que empiezan por «.» (como los temporales ``.….generando.mp4``)
+    # no son vídeos, previas, shorts ni piezas.
     return [
         ruta
         for ruta in _entradas_seguras(raiz, directorio)
-        if ruta.is_file() and predicado(ruta.name)
+        if not ruta.name.startswith(".") and ruta.is_file() and predicado(ruta.name)
     ]
 
 
@@ -771,6 +773,18 @@ def leer_leccion(
         piezas,
         bd,
     )
+    montaje = None
+    if numero in guiones:
+        # Importación local: acciones consume las primitivas de lectura para
+        # construir el catálogo y no debe crear un ciclo al cargar el módulo.
+        from estudio_api.acciones import estado_montaje
+
+        montaje = estado_montaje(
+            config,
+            identificador_guion,
+            carpeta_de_trabajo(leido, numero),
+            guiones[numero][2],
+        )
     return Leccion(
         curso=curso,
         numero=numero,
@@ -792,4 +806,5 @@ def leer_leccion(
         piezas=piezas,
         previas=_previas(config, carpeta),
         duracion_s=duracion,
+        montaje=montaje,
     )
