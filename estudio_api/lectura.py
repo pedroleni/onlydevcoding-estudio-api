@@ -571,7 +571,42 @@ def _previas(config: Config, carpeta: Path | None) -> list[str]:
     return [_ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in archivos]
 
 
+def _titulos_publicados(config: Config, carpeta: Path | None) -> dict[str, str]:
+    """Títulos por id de pieza de publicar/publicacion.json; vacío si no es legible."""
+    if carpeta is None:
+        return {}
+    try:
+        relativa = carpeta.relative_to(config.cursos_dir.resolve())
+        ruta = ruta_segura(
+            config.cursos_dir, *relativa.parts, "publicar", "publicacion.json"
+        )
+    except ValueError:
+        return {}
+    datos = _leer_json(ruta)
+    piezas = datos.get("piezas") if datos is not None else None
+    if not isinstance(piezas, dict):
+        return {}
+    titulos: dict[str, str] = {}
+    for identificador, pieza in piezas.items():
+        titulo = pieza.get("titulo") if isinstance(pieza, dict) else None
+        if isinstance(titulo, str) and titulo.strip():
+            titulos[identificador] = titulo
+    return titulos
+
+
 def _piezas(
+    config: Config,
+    carpeta: Path | None,
+    titulo_leccion: str,
+) -> list[Pieza]:
+    titulos = _titulos_publicados(config, carpeta)
+    return [
+        pieza.model_copy(update={"titulo": titulos.get(pieza.id, pieza.titulo)})
+        for pieza in _piezas_de_disco(config, carpeta, titulo_leccion)
+    ]
+
+
+def _piezas_de_disco(
     config: Config,
     carpeta: Path | None,
     titulo_leccion: str,

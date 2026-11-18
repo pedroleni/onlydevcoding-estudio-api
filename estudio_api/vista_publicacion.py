@@ -102,7 +102,7 @@ def _construir_pieza(
     elegida = elegidas.get(identificador)
 
     video_json = _ruta_json(config, carpeta, datos.video if datos else None)
-    if datos is not None and datos.titulo is not None:
+    if datos is not None and datos.titulo and datos.titulo.strip():
         titulo = datos.titulo
     elif disco is not None:
         titulo = disco.titulo

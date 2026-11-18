@@ -1,3 +1,4 @@
+import json
 from contextlib import closing
 from datetime import date, timedelta
 from shutil import rmtree
@@ -137,6 +138,51 @@ def test_crear_tarea_con_enlace_valido_resuelve_los_titulos(cliente_con_token):
         "pieza_titulo": "Reel salida",
         "roto": False,
     }
+
+
+def test_enlace_de_tarea_usa_el_titulo_de_publicacion(
+    cliente_con_token,
+    cfg,
+):
+    ruta = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "publicacion.json"
+    )
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {
+                    "reel-salida": {
+                        "titulo": "Reel de salida · Importar y exportar en 5 pasos"
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json=_nueva(
+            enlace={
+                "curso": "react",
+                "numero": 4,
+                "pieza": "reel-salida",
+                "red": "instagram",
+            }
+        ),
+    )
+
+    assert respuesta.status_code == 201
+    assert respuesta.json()["enlace_vista"]["pieza_titulo"] == (
+        "Reel de salida · Importar y exportar en 5 pasos"
+    )
 
 
 @pytest.mark.parametrize(

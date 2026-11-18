@@ -258,6 +258,67 @@ def test_piezas_y_portadas(cfg):
     assert all(ruta.startswith("cursos/") for ruta in leccion.piezas[2].portadas)
 
 
+def test_piezas_usan_los_titulos_de_publicacion_por_id(cfg):
+    verticales = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "2-shorts-y-reels"
+    )
+    (verticales / "reel-salida.mp4").rename(verticales / "reel-nombre-sin-relacion.mp4")
+    publicacion = {
+        "version": 1,
+        "piezas": {
+            "reel-salida": {"titulo": "Reel de salida · Cinco pasos"},
+            "short-1": {"titulo": "Título de otra pieza"},
+            "short-2": {"titulo": "Short 2 · Tu navegador no entiende React"},
+        },
+    }
+    (verticales.parent / "publicacion.json").write_text(
+        json.dumps(publicacion, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert {pieza.id: pieza.titulo for pieza in leccion.piezas} == {
+        "leccion": "Importar componentes",
+        "reel-salida": "Reel de salida · Cinco pasos",
+        "short-2": "Short 2 · Tu navegador no entiende React",
+    }
+
+
+@pytest.mark.parametrize(
+    "contenido",
+    [
+        None,
+        {"version": 1, "piezas": {"reel-salida": {}}},
+        {"version": 1, "piezas": {"reel-salida": {"titulo": "   "}}},
+        "{json roto",
+    ],
+)
+def test_piezas_conservan_el_titulo_del_archivo_sin_titulo_publicado(cfg, contenido):
+    ruta = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "publicacion.json"
+    )
+    if isinstance(contenido, dict):
+        ruta.write_text(json.dumps(contenido), encoding="utf-8")
+    elif contenido is not None:
+        ruta.write_text(contenido, encoding="utf-8")
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    reel = next(pieza for pieza in leccion.piezas if pieza.id == "reel-salida")
+    assert reel.titulo == "Reel salida"
+
+
 def test_ids_estables_de_leccion_reel_unico_y_short(cfg):
     verticales = (
         cfg.cursos_dir

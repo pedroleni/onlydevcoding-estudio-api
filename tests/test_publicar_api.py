@@ -151,6 +151,24 @@ def test_get_con_json_une_prioriza_y_ordena_las_piezas(cliente, cfg):
     assert vista["aviso"] is None
 
 
+def test_get_ignora_un_titulo_de_publicacion_vacio(cliente, cfg):
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {"reel-salida": {"titulo": "   "}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente.get(RUTA_PUBLICACION)
+
+    assert respuesta.status_code == 200
+    assert _pieza(respuesta.json(), "reel-salida")["titulo"] == "Reel salida"
+
+
 def test_get_incluye_portadas_candidatas_de_las_subcarpetas(cliente, cfg):
     publicar = _carpeta_leccion(cfg) / "publicar"
     youtube = publicar / "1-youtube-leccion"
