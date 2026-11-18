@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from estudio_api.app import crear_app
 from estudio_api.decisiones import abrir_bd
 from estudio_api.teleprompter import comando_previa
-from estudio_api.trabajos import esperar, leer_trabajo
+from estudio_api.trabajos import MENSAJES_PREVIA, esperar, leer_trabajo
 from tests.ayudas import TOKEN
 
 CABECERAS = {"X-Estudio-Token": TOKEN}
@@ -363,6 +363,40 @@ def test_post_lanza_el_trabajo_y_coloca_la_previa(teleprompter, monkeypatch):
     assert ruta_previa.read_bytes() == b"video"
     with closing(abrir_bd(config.bd_ruta)) as bd:
         assert leer_trabajo(bd, trabajo_id).estado == "hecho"
+
+
+def test_post_previa_usa_sus_mensajes_para_un_codigo_de_salida_3(
+    teleprompter, monkeypatch
+):
+    config, cliente, _, _, _, _ = teleprompter
+    monkeypatch.setattr("estudio_api.rutas_teleprompter.shutil.which", lambda _: "/npx")
+    monkeypatch.setattr(
+        "estudio_api.rutas_teleprompter.comando_previa",
+        lambda *_: [sys.executable, "-c", "raise SystemExit(3)"],
+    )
+    from estudio_api import rutas_teleprompter
+
+    lanzar_real = rutas_teleprompter.lanzar
+    planes = []
+
+    def lanzar_capturando(bd_ruta, curso, numero, plan):
+        planes.append(plan)
+        return lanzar_real(bd_ruta, curso, numero, plan)
+
+    monkeypatch.setattr(rutas_teleprompter, "lanzar", lanzar_capturando)
+
+    respuesta = cliente.post(RUTA_PREVIA, headers=CABECERAS, json={})
+
+    assert respuesta.status_code == 202
+    trabajo_id = respuesta.json()["id"]
+    esperar(trabajo_id, 5)
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        terminado = leer_trabajo(bd, trabajo_id)
+    assert terminado is not None
+    assert terminado.estado == "error"
+    assert terminado.error == "Remotion terminó con el código 3"
+    assert len(planes) == 1
+    assert planes[0].mensajes is MENSAJES_PREVIA
 
 
 def test_segundo_post_mientras_corre_devuelve_409(teleprompter, monkeypatch):

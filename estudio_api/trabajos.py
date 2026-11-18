@@ -61,9 +61,6 @@ MENSAJES_PREVIA = Mensajes(
 )
 
 # Mensajes comunes: el detalle técnico (excepción y rutas) solo va al log.
-ERROR_ARRANQUE = MENSAJES_PREVIA.arranque
-ERROR_GUARDADO = MENSAJES_PREVIA.guardado
-ERROR_TIEMPO = MENSAJES_PREVIA.tiempo
 ERROR_INTERRUMPIDO = "El trabajo se ha interrumpido al cerrar la API"
 ERROR_CANCELADO = "Cancelado"
 ERROR_SIN_PISAR = "Ya existe una versión con ese número; vuelve a lanzarlo"
@@ -356,7 +353,7 @@ def _ruta_archivada(destino: Path) -> Path:
         indice += 1
 
 
-def _instalar_resultado(plan: PlanTrabajo) -> None:
+def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
     temporal = plan.temporal
     destino = plan.destino
     if temporal is None or destino is None:
@@ -366,7 +363,7 @@ def _instalar_resultado(plan: PlanTrabajo) -> None:
         return
     if plan.instalar == "sin_pisar":
         os.link(temporal, destino)
-        temporal.unlink()
+        _borrar_temporal_sin_fallar(temporal, trabajo_id)
         return
 
     if not destino.exists():
@@ -530,6 +527,9 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
             )
             return
         if motivo == "cancelado":
+            # El líder puede haber muerto antes que un descendiente que no
+            # hereda stdout. No se borra ni se finaliza hasta parar el grupo.
+            _terminar_grupo(proceso)
             _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             _finalizar_con_reintento(
                 bd_ruta,
@@ -553,9 +553,16 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
             return
 
         try:
-            _instalar_resultado(plan)
-        except FileExistsError:
-            logger.warning("El destino del trabajo %s ya existe", trabajo_id)
+            _instalar_resultado(plan, trabajo_id)
+        except OSError as error:
+            if plan.instalar == "sin_pisar" and isinstance(error, FileExistsError):
+                logger.warning("El destino del trabajo %s ya existe", trabajo_id)
+                mensaje = ERROR_SIN_PISAR
+            else:
+                logger.exception(
+                    "No se pudo instalar el resultado del trabajo %s", trabajo_id
+                )
+                mensaje = plan.mensajes.guardado
             _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             _finalizar_con_reintento(
                 bd_ruta,
@@ -563,21 +570,7 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
                 "error",
                 progreso,
                 registro,
-                ERROR_SIN_PISAR,
-            )
-            return
-        except OSError:
-            logger.exception(
-                "No se pudo instalar el resultado del trabajo %s", trabajo_id
-            )
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "error",
-                progreso,
-                registro,
-                plan.mensajes.guardado,
+                mensaje,
             )
             return
         _finalizar_con_reintento(
@@ -590,14 +583,23 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
         )
     except Exception:
         logger.exception("Fallo inesperado en el trabajo %s", trabajo_id)
-        if proceso is not None and proceso.poll() is None:
+        with en_curso.cerrojo:
+            motivo = en_curso.motivo
+            en_curso.motivo = en_curso.motivo or "fin"
+        if proceso is not None and (motivo == "cancelado" or proceso.poll() is None):
             _terminar_grupo(proceso)
             proceso.wait()
         _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-        with en_curso.cerrojo:
-            apagado = en_curso.motivo == "apagado"
-            en_curso.motivo = en_curso.motivo or "fin"
-        if not apagado:
+        if motivo == "cancelado":
+            _finalizar_con_reintento(
+                bd_ruta,
+                trabajo_id,
+                "cancelado",
+                progreso,
+                registro,
+                ERROR_CANCELADO,
+            )
+        elif motivo != "apagado":
             _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
@@ -732,9 +734,7 @@ def cancelar(bd_ruta: Path, id: int) -> Trabajo | None:
     with en_curso.cerrojo:
         if en_curso.motivo is None:
             en_curso.motivo = "cancelado"
-        elif en_curso.motivo != "cancelado":
-            return None
-        proceso = en_curso.proceso
+        proceso = en_curso.proceso if en_curso.motivo == "cancelado" else None
 
     limite = monotonic() + 15
     if proceso is not None:
@@ -745,10 +745,7 @@ def cancelar(bd_ruta: Path, id: int) -> Trabajo | None:
     hilo.join(max(0.0, limite - monotonic()))
 
     with closing(abrir_bd(bd_ruta)) as bd:
-        trabajo = leer_trabajo(bd, id)
-    if trabajo is not None and trabajo.estado == "cancelado":
-        return trabajo
-    return None
+        return leer_trabajo(bd, id)
 
 
 def interrumpir_huerfanos(bd: sqlite3.Connection) -> int:
