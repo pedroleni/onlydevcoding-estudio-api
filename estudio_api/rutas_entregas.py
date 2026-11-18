@@ -3,8 +3,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
+from estudio_api.acciones import ACCIONES_QUE_LEEN_LAS_ENTREGAS
 from estudio_api.camara import TomasCamara, leer_camara
 from estudio_api.colocar import (
     Asignacion,
@@ -27,7 +29,12 @@ from estudio_api.entregas import (
 from estudio_api.lectura import _leer_json, datos_curso
 from estudio_api.propuesta import PATRON_ESCENA_CAMARA, Propuesta, leer_propuesta
 from estudio_api.rutas import ruta_segura
-from estudio_api.rutas_api import CursoId, NumeroLeccion, config_peticion
+from estudio_api.rutas_api import (
+    CursoId,
+    NumeroLeccion,
+    config_peticion,
+    exigir_leccion_libre,
+)
 
 router = APIRouter(prefix="/api")
 ArchivoRuta = Annotated[str, Path(min_length=1)]
@@ -163,7 +170,7 @@ def obtener_entregas(
         entregas = listar_entregas(config, curso, numero, datos=datos)
         propuesta = leer_propuesta(config, curso, numero, datos=datos)
         destinos = _destinos(config, curso, numero, datos=datos)
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise HTTPException(
             status_code=503,
             detail="No se han podido leer las tomas entregadas",
@@ -239,9 +246,14 @@ async def subir_entrega(
             detail="La toma tiene que ser un vídeo MOV o MP4",
         )
     longitud = int(request.headers["content-length"])
+    config = config_peticion(request)
+    # Antes de leer el cuerpo: ``identificar-tomas`` está leyendo las entregas.
+    await run_in_threadpool(
+        exigir_leccion_libre, config, curso, numero, ACCIONES_QUE_LEEN_LAS_ENTREGAS
+    )
     try:
         return await guardar_entrega(
-            config_peticion(request),
+            config,
             curso,
             numero,
             archivo,
@@ -281,19 +293,21 @@ def eliminar_entrega(
     numero: NumeroLeccion,
     archivo: ArchivoRuta,
 ) -> Response:
+    config = config_peticion(request)
+    exigir_leccion_libre(config, curso, numero, ACCIONES_QUE_LEEN_LAS_ENTREGAS)
     try:
-        borrada = borrar_entrega(config_peticion(request), curso, numero, archivo)
+        borrada = borrar_entrega(config, curso, numero, archivo)
     except NombreEntregaInvalido as error:
         raise _error_nombre() from error
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise HTTPException(
             status_code=503,
             detail="No se ha podido borrar la toma",
         ) from error
     if not borrada:
         try:
-            leccion = listar_entregas(config_peticion(request), curso, numero)
-        except OSError as error:
+            leccion = listar_entregas(config, curso, numero)
+        except (OSError, ValueError) as error:
             raise HTTPException(
                 status_code=503,
                 detail="No se ha podido borrar la toma",

@@ -29,6 +29,7 @@ from estudio_api.trabajos import (
     listar_trabajos,
 )
 from tests.ayudas import TOKEN
+from tests.test_tomas import _wav
 
 CABECERAS = {"X-Estudio-Token": TOKEN}
 RUTA_ACCIONES = "/api/cursos/react/lecciones/4/acciones"
@@ -1149,7 +1150,7 @@ def test_put_textos_mientras_se_prepara_el_montaje_da_409(catalogo, monkeypatch)
 
 @pytest.mark.parametrize(
     "accion",
-    ["alinear-voz", "preparar-montaje", "preparar-shorts", "identificar-tomas"],
+    ["alinear-voz", "preparar-montaje", "preparar-shorts"],
 )
 def test_put_textos_y_toma_con_trabajo_de_la_leccion_dan_409(
     catalogo, monkeypatch, accion
@@ -1501,3 +1502,129 @@ def test_con_otro_trabajo_en_marcha_no_se_crea_ni_se_borra_nada(catalogo, monkey
     assert final.status_code == 409
     assert not (carpeta / "shorts").exists()
     assert temporal_ajeno.read_bytes() == b"lo escribe otro trabajo"
+
+
+def test_identificar_tomas_bloquea_los_textos_pero_no_la_voz(catalogo):
+    cliente = catalogo["cliente"]
+    _registrar_en_marcha(catalogo["config"], "identificar-tomas")
+    antes = catalogo["guion"].read_bytes()
+    nueva = _wav(relleno=7)
+
+    textos = _guardar_textos(cliente, "Texto cambiado.")
+    toma = cliente.put(
+        RUTA_TOMA,
+        headers={**CABECERAS, "Content-Type": "audio/wav"},
+        content=nueva,
+    )
+
+    assert textos.status_code == 409
+    assert textos.json()["detail"] == MENSAJE_LECCION_OCUPADA
+    assert catalogo["guion"].read_bytes() == antes
+    assert toma.status_code == 201
+    assert catalogo["toma"].read_bytes() == nueva
+
+
+def _escena_con_original(catalogo, original):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"] = [e for e in guion["escenas"] if e["id"] != "E17"]
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": original},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+
+def _plan_mejorar(catalogo):
+    return plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "mejorar-toma",
+        OpcionesAccion(escena="E17"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "archivo"),
+    [
+        ("grabaciones/videos/notas.txt", "grabaciones/videos/notas.txt"),
+        ("notas-privadas.mov", "notas-privadas.mov"),
+        ("grabaciones/notas.mov", "grabaciones/notas.mov"),
+        ("grabaciones/videos/.oculto.mov", "grabaciones/videos/.oculto.mov"),
+        ("grabaciones/videos/Sin Rosa/a.mov", "grabaciones/videos/Sin Rosa/a.mov"),
+        ("grabaciones/videos/a/b/c.mov", "grabaciones/videos/a/b/c.mov"),
+        ("grabaciones/videos/../videos/a.mov", "grabaciones/videos/a.mov"),
+        ("grabaciones/videos/carpeta.mov", None),
+    ],
+)
+def test_mejorar_toma_exige_un_video_literal_en_grabaciones_videos(
+    catalogo, monkeypatch, original, archivo
+):
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+    carpeta = catalogo["carpeta"]
+    if archivo is None:
+        (carpeta / "grabaciones" / "videos" / "carpeta.mov").mkdir(parents=True)
+    else:
+        (carpeta / archivo).parent.mkdir(parents=True, exist_ok=True)
+        (carpeta / archivo).write_bytes(b"no es un original")
+    _escena_con_original(catalogo, original)
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        _plan_mejorar(catalogo)
+    acciones = {
+        accion["id"]: accion for accion in catalogo["cliente"].get(RUTA_ACCIONES).json()
+    }
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+    assert acciones["mejorar-toma"]["opciones"] == []
+
+
+def test_mejorar_toma_rechaza_original_enlazado_dentro_de_la_leccion(catalogo):
+    carpeta = catalogo["carpeta"]
+    (carpeta / "notas-privadas.txt").write_text("no es un vídeo", encoding="utf-8")
+    videos = carpeta / "grabaciones" / "videos"
+    videos.mkdir(parents=True)
+    (videos / "enlace.mov").symlink_to(carpeta / "notas-privadas.txt")
+    real = carpeta / "grabaciones" / "reales"
+    real.mkdir()
+    (real / "a.mov").write_bytes(b"original")
+    (videos / "sin-rosa").symlink_to(real)
+    _escena_con_original(catalogo, "grabaciones/videos/enlace.mov")
+
+    with pytest.raises(AccionNoDisponible):
+        _plan_mejorar(catalogo)
+
+    _escena_con_original(catalogo, "grabaciones/videos/sin-rosa/a.mov")
+    with pytest.raises(AccionNoDisponible):
+        _plan_mejorar(catalogo)
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "grabaciones/videos/Facetune12345678 2.MOV",
+        "grabaciones/videos/sin-rosa/Facetune12345678 (1).mov",
+        "grabaciones/videos/clip-01.mp4",
+    ],
+)
+def test_mejorar_toma_admite_originales_a_mano_y_subcarpeta(
+    catalogo, monkeypatch, original
+):
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+    ruta = catalogo["carpeta"] / original
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_bytes(b"original-ficticio")
+    _escena_con_original(catalogo, original)
+
+    plan = _plan_mejorar(catalogo)
+
+    assert plan.comando[3] == str(ruta.resolve())

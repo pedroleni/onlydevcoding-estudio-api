@@ -89,6 +89,27 @@ def _caracter_prohibido(caracter: str) -> bool:
     }
 
 
+def _sin_saltos_ni_controles(texto: str) -> bool:
+    return len(texto.splitlines()) <= 1 and not any(
+        _caracter_prohibido(caracter) for caracter in texto
+    )
+
+
+def validar_texto_toma(texto: str, maximo: int = 2000) -> str:
+    """Texto reconocido de una toma: una línea, sin controles ni bidireccionales.
+
+    Puede quedar vacío (una toma sin voz reconocida). Lanza ``ValueError``.
+    """
+    texto = texto.strip()
+    if not _sin_saltos_ni_controles(texto):
+        raise ValueError(
+            "El texto no puede contener saltos de línea ni caracteres de control"
+        )
+    if len(texto) > maximo:
+        raise ValueError(f"El texto no puede superar los {maximo} caracteres")
+    return texto
+
+
 def _validar_texto(texto: str) -> str:
     texto = texto.strip()
     if not texto:

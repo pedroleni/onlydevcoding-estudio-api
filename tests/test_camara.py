@@ -46,8 +46,14 @@ def test_escena_con_toma_e_ia_y_escena_sin_toma(cfg, cliente):
     }
     _guion(cfg, escenas, [])
     leccion = cfg.cursos_dir / "REACT" / "04-importar-y-exportar"
-    _escritura(leccion / "grabaciones" / "videos" / "ia" / "E01.mov")
-    _escritura(cfg.estudio_dir / "public" / "grabaciones" / "react-04" / "E01.mov")
+    _escritura(
+        leccion / "grabaciones" / "videos" / "ia" / "E01.mov",
+        mtime_ns=2_000_000_000_000,
+    )
+    _escritura(
+        cfg.estudio_dir / "public" / "grabaciones" / "react-04" / "E01.mov",
+        mtime_ns=1_000_000_000_000,
+    )
 
     cuerpo = cliente.get(RUTA).json()
 
@@ -165,3 +171,44 @@ def test_leccion_a_mano_sin_ganchos_entregados(cfg, cliente):
 @pytest.mark.parametrize("ruta", ["/api/cursos/react/lecciones/9/camara"])
 def test_leccion_inexistente_da_404(cliente, ruta):
     assert cliente.get(ruta).status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("mtime_ia", "mejorada"),
+    [(2_000_000_000_000, True), (3_000_000_000_000, True), (1_000_000_000_000, False)],
+)
+def test_mejorada_solo_si_la_copia_ia_es_posterior_al_video_publico(
+    cfg, cliente, mtime_ia, mejorada
+):
+    escenas = _escenas()
+    escenas[0]["toma"] = {"original": "grabaciones/videos/Facetune 1.MOV"}
+    _guion(cfg, escenas, [])
+    leccion = cfg.cursos_dir / "REACT" / "04-importar-y-exportar"
+    _escritura(
+        cfg.estudio_dir / "public" / "grabaciones" / "react-04" / "E01.mov",
+        mtime_ns=2_000_000_000_000,
+    )
+    _escritura(leccion / "grabaciones" / "videos" / "ia" / "E01.mov", mtime_ns=mtime_ia)
+
+    assert cliente.get(RUTA).json()["escenas"][0]["mejorada"] is mejorada
+
+
+def test_mejorada_es_falso_sin_video_publico_o_si_la_copia_es_un_enlace(
+    cfg, cliente, tmp_path
+):
+    escenas = _escenas()
+    _guion(cfg, escenas, [])
+    ia = cfg.cursos_dir / "REACT" / "04-importar-y-exportar" / "grabaciones"
+    ia = ia / "videos" / "ia"
+    _escritura(ia / "E01.mov", mtime_ns=2_000_000_000_000)
+    fuera = tmp_path / "fuera.mov"
+    _escritura(fuera, mtime_ns=3_000_000_000_000)
+    (ia / "E02.mov").symlink_to(fuera)
+    _escritura(
+        cfg.estudio_dir / "public" / "grabaciones" / "react-04" / "E02.mov",
+        mtime_ns=1_000_000_000_000,
+    )
+
+    escenas = cliente.get(RUTA).json()["escenas"]
+
+    assert [escena["mejorada"] for escena in escenas] == [False, False]

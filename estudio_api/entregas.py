@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import secrets
 import stat
 import threading
 from collections.abc import AsyncIterator
@@ -11,13 +13,14 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from estudio_api.config import Config
-from estudio_api.lectura import carpeta_de_trabajo, datos_curso
+from estudio_api.lectura import MAX_TAMANO_JSON, carpeta_de_trabajo, datos_curso
 from estudio_api.rutas import ruta_segura
 
 PATRON_ARCHIVO_ENTREGA = re.compile(
     r"^[A-Za-z0-9_(][A-Za-z0-9 _().-]{0,115}\.(?i:mov|mp4)$"
 )
 TAMANO_MAXIMO_ENTREGA = 4_294_967_296
+EXTENSIONES_ANALISIS = ("json", "wav", "origen")
 
 _BLOQUEO_INSTALACION = threading.Lock()
 _SUBIDAS_EN_CURSO: set[tuple[Path, str]] = set()
@@ -450,6 +453,84 @@ def listar_entregas(
     return sorted(archivos, key=lambda entrega: entrega.archivo)
 
 
+def _leer_propuesta_cruda(descriptor_carpeta: int) -> dict[str, Any] | None:
+    """``propuesta.json`` tal cual, o ``None`` si no hay o no se entiende.
+
+    Lanza ``OSError`` si es un enlace simbólico.
+    """
+    try:
+        descriptor = os.open(
+            "propuesta.json",
+            os.O_RDONLY | _O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=descriptor_carpeta,
+        )
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as entrada:
+        datos_archivo = os.fstat(entrada.fileno())
+        if (
+            not stat.S_ISREG(datos_archivo.st_mode)
+            or datos_archivo.st_size > MAX_TAMANO_JSON
+        ):
+            return None
+        contenido = entrada.read(MAX_TAMANO_JSON + 1)
+    if len(contenido) > MAX_TAMANO_JSON:
+        return None
+    try:
+        datos = json.loads(contenido.decode("utf-8"))
+    except UnicodeError, RecursionError, ValueError:
+        return None
+    if not isinstance(datos, dict) or not isinstance(datos.get("archivos"), list):
+        return None
+    return datos
+
+
+def _escribir_propuesta_cruda(descriptor_carpeta: int, datos: dict[str, Any]) -> None:
+    temporal = f".propuesta.{secrets.token_hex(8)}.tmp"
+    descriptor = os.open(
+        temporal,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+        0o600,
+        dir_fd=descriptor_carpeta,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as salida:
+            json.dump(datos, salida, ensure_ascii=False, indent=2)
+            salida.write("\n")
+            salida.flush()
+            os.fsync(salida.fileno())
+        os.replace(
+            temporal,
+            "propuesta.json",
+            src_dir_fd=descriptor_carpeta,
+            dst_dir_fd=descriptor_carpeta,
+        )
+    except BaseException:
+        try:
+            os.unlink(temporal, dir_fd=descriptor_carpeta)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _quitar_de_propuesta(descriptor_carpeta: int, archivo: str) -> None:
+    """Quita de ``propuesta.json`` la entrada de ``archivo``; si no queda nada, la borra."""
+    datos = _leer_propuesta_cruda(descriptor_carpeta)
+    if datos is None:
+        return
+    restantes = [
+        toma
+        for toma in datos["archivos"]
+        if not (isinstance(toma, dict) and toma.get("archivo") == archivo)
+    ]
+    if len(restantes) == len(datos["archivos"]):
+        return
+    if not restantes:
+        os.unlink("propuesta.json", dir_fd=descriptor_carpeta)
+        return
+    _escribir_propuesta_cruda(descriptor_carpeta, {**datos, "archivos": restantes})
+
+
 def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:
     if PATRON_ARCHIVO_ENTREGA.fullmatch(archivo) is None:
         raise NombreEntregaInvalido
@@ -473,22 +554,29 @@ def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> boo
 
         analisis = _ruta_literal_segura(carpeta, ".analisis")
         datos_analisis = _lstat_o_none(analisis)
+        if datos_analisis is not None and not stat.S_ISDIR(datos_analisis.st_mode):
+            raise OSError("La carpeta de análisis no es un directorio real")
+
+        # Primero la propuesta: si falla, no se ha borrado nada.
+        _quitar_de_propuesta(descriptor, nombre_real)
+
         if datos_analisis is not None:
-            if not stat.S_ISDIR(datos_analisis.st_mode):
-                raise OSError("La carpeta de análisis no es un directorio real")
             descriptor_analisis = os.open(
                 analisis,
                 os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
             )
             try:
-                prefijo = f"{nombre_real}."
-                with os.scandir(descriptor_analisis) as entradas:
-                    for entrada in entradas:
-                        if not entrada.name.startswith(prefijo):
-                            continue
-                        datos = entrada.stat(follow_symlinks=False)
-                        if stat.S_ISREG(datos.st_mode):
-                            os.unlink(entrada.name, dir_fd=descriptor_analisis)
+                # Solo los tres nombres exactos: ``a.mov`` no toca ``a.mov.mov.*``.
+                for extension in EXTENSIONES_ANALISIS:
+                    nombre = f"{nombre_real}.{extension}"
+                    try:
+                        datos = os.stat(
+                            nombre, dir_fd=descriptor_analisis, follow_symlinks=False
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(datos.st_mode):
+                        os.unlink(nombre, dir_fd=descriptor_analisis)
                 os.fsync(descriptor_analisis)
             finally:
                 os.close(descriptor_analisis)

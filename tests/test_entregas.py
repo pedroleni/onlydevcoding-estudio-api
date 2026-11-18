@@ -3,6 +3,8 @@ import inspect
 import json
 import logging
 import shutil
+from contextlib import closing
+from datetime import datetime
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -15,6 +17,7 @@ from estudio_api import entregas as modulo_entregas
 from estudio_api import propuesta as modulo_propuesta
 from estudio_api import rutas_entregas as modulo_rutas_entregas
 from estudio_api.app import crear_app
+from estudio_api.decisiones import abrir_bd
 from estudio_api.entregas import carpeta_entregas, guardar_entrega
 from estudio_api.rutas_entregas import subir_entrega
 from tests.ayudas import TOKEN
@@ -681,3 +684,233 @@ def test_docstring_carpeta_entregas_documenta_none_y_enlaces_simbolicos():
     assert "None" in documentacion
     assert "OSError" in documentacion
     assert "enlace" in documentacion.casefold()
+
+
+def _en_marcha(config, accion: str) -> None:
+    with closing(abrir_bd(config.bd_ruta)) as bd, bd:
+        bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, estado, inicio)
+            VALUES (?, 'react', 4, 'en_marcha', ?)
+            """,
+            (accion, datetime.now().astimezone().isoformat()),
+        )
+
+
+def _borrar(cliente, archivo: str):
+    return cliente.delete(
+        f"{RUTA_ENTREGAS}/{quote(archivo, safe='')}",
+        headers={"X-Estudio-Token": TOKEN, "Content-Length": "0"},
+    )
+
+
+def test_put_y_delete_dan_409_mientras_se_identifican_las_tomas(entregas, monkeypatch):
+    config, cliente, leccion = entregas
+    assert _subir(cliente, "toma-a.mov", _video(64)).status_code == 201
+    _en_marcha(config, "identificar-tomas")
+
+    async def no_leer_el_cuerpo(*_args, **_kwargs):
+        raise AssertionError("No se debe leer el cuerpo de la toma")
+
+    monkeypatch.setattr(modulo_rutas_entregas, "guardar_entrega", no_leer_el_cuerpo)
+
+    subida = _subir(cliente, "otra.mov", _video(64))
+    borrado = _borrar(cliente, "toma-a.mov")
+
+    for respuesta in (subida, borrado):
+        assert respuesta.status_code == 409
+        assert respuesta.json()["detail"] == (
+            "No se puede cambiar mientras se prepara esta lección. "
+            "Espera a que termine el trabajo."
+        )
+    carpeta = leccion / "grabaciones" / "entregas"
+    assert (carpeta / "toma-a.mov").is_file()
+    assert not (carpeta / "otra.mov").exists()
+
+
+def test_otros_trabajos_de_la_leccion_no_bloquean_las_entregas(entregas):
+    config, cliente, _ = entregas
+    _en_marcha(config, "render-leccion")
+
+    assert _subir(cliente, "toma-a.mov", _video(64)).status_code == 201
+    assert _borrar(cliente, "toma-a.mov").status_code == 204
+
+
+def _propuesta_de(archivos: list[tuple[str, int]]) -> dict:
+    return {
+        "version": 1,
+        "guion": "react-04",
+        "archivos": [
+            {
+                "archivo": archivo,
+                "bytes": tamano,
+                "orientacion": "horizontal",
+                "duracion": 5.0,
+                "texto": "Texto reconocido ficticio.",
+                "propuesta": {"tipo": "camara", "id": "E01"},
+                "repite": None,
+                "candidatos": [
+                    {
+                        "tipo": "camara",
+                        "id": "E01",
+                        "puntuacion": 0.9,
+                        "desde": 0.25,
+                        "hasta": 4.75,
+                        "cues": [],
+                    }
+                ],
+            }
+            for archivo, tamano in archivos
+        ],
+    }
+
+
+def _guion_con_camara(config) -> None:
+    ruta = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta.read_text(encoding="utf-8"))
+    for escena in guion["escenas"]:
+        if escena["id"] == "E01":
+            escena["cues"] = []
+    ruta.write_text(json.dumps(guion), encoding="utf-8")
+
+
+def test_delete_quita_la_entrada_de_la_propuesta(entregas):
+    config, cliente, leccion = entregas
+    _guion_con_camara(config)
+    carpeta = leccion / "grabaciones" / "entregas"
+    assert _subir(cliente, "toma-a.mov", _video(64)).status_code == 201
+    assert _subir(cliente, "toma-b.mov", _video(80)).status_code == 201
+    propuesta = carpeta / "propuesta.json"
+    propuesta.write_text(
+        json.dumps(_propuesta_de([("toma-a.mov", 64), ("toma-b.mov", 80)])),
+        encoding="utf-8",
+    )
+
+    assert _borrar(cliente, "toma-a.mov").status_code == 204
+
+    restante = json.loads(propuesta.read_text(encoding="utf-8"))
+    assert restante["version"] == 1
+    assert restante["guion"] == "react-04"
+    assert [toma["archivo"] for toma in restante["archivos"]] == ["toma-b.mov"]
+    listado = cliente.get(RUTA_ENTREGAS).json()
+    assert [toma["archivo"] for toma in listado["propuesta"]["archivos"]] == [
+        "toma-b.mov"
+    ]
+
+    assert _borrar(cliente, "toma-b.mov").status_code == 204
+
+    assert not propuesta.exists()
+
+
+def test_propuesta_vieja_no_se_aplica_a_otro_video_con_el_mismo_nombre(entregas):
+    """Reproducción de la sonda de L1 (auditoría de la fase 6)."""
+    config, cliente, leccion = entregas
+    _guion_con_camara(config)
+    carpeta = leccion / "grabaciones" / "entregas"
+    viejo = _video(64, 1)
+    assert _subir(cliente, "toma-a.mov", viejo).status_code == 201
+    assert _borrar(cliente, "toma-a.mov").status_code == 204
+    # La herramienta, que seguía analizando la toma borrada, escribe tarde.
+    analisis = carpeta / ".analisis"
+    analisis.mkdir(exist_ok=True)
+    (analisis / "toma-a.mov.json").write_text("[]", encoding="utf-8")
+    (carpeta / "propuesta.json").write_text(
+        json.dumps(_propuesta_de([("toma-a.mov", len(viejo))])),
+        encoding="utf-8",
+    )
+    nuevo = _video(4096, 7)
+    assert _subir(cliente, "toma-a.mov", nuevo).status_code == 201
+    ruta_guion = config.estudio_dir / "lecciones" / "react-04.json"
+    guion_antes = ruta_guion.read_bytes()
+
+    listado = cliente.get(RUTA_ENTREGAS).json()
+    colocar = cliente.post(
+        f"{RUTA_ENTREGAS}/colocar",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"asignaciones": [{"archivo": "toma-a.mov", "destino": "E01"}]},
+    )
+
+    assert listado["propuesta"]["archivos"] == []
+    assert colocar.status_code == 422
+    assert ruta_guion.read_bytes() == guion_antes
+    assert (carpeta / "toma-a.mov").read_bytes() == nuevo
+    assert not (
+        config.estudio_dir / "public" / "grabaciones" / "react-04" / "E01.mov"
+    ).exists()
+
+
+def test_delete_solo_borra_los_tres_analisis_exactos(entregas):
+    _, cliente, leccion = entregas
+    carpeta = leccion / "grabaciones" / "entregas"
+    assert _subir(cliente, "a.mov", _video(64)).status_code == 201
+    assert _subir(cliente, "a.mov.mov", _video(64)).status_code == 201
+    analisis = carpeta / ".analisis"
+    analisis.mkdir()
+    for extension in ("json", "wav", "origen"):
+        (analisis / f"a.mov.{extension}").write_text("propio", encoding="utf-8")
+        (analisis / f"a.mov.mov.{extension}").write_text("ajeno", encoding="utf-8")
+    (analisis / "a.mov.extra").write_text("conservar", encoding="utf-8")
+
+    assert _borrar(cliente, "a.mov").status_code == 204
+
+    for extension in ("json", "wav", "origen"):
+        assert not (analisis / f"a.mov.{extension}").exists()
+        assert (analisis / f"a.mov.mov.{extension}").read_text(
+            encoding="utf-8"
+        ) == "ajeno"
+    assert (analisis / "a.mov.extra").read_text(encoding="utf-8") == "conservar"
+    assert (carpeta / "a.mov.mov").is_file()
+
+
+@pytest.fixture
+def entregas_sin_excepciones(cfg):
+    config = cfg.model_copy(update={"token_escritura": TOKEN})
+    leccion = cfg.cursos_dir / "REACT" / "04-importar-y-exportar"
+    with TestClient(
+        crear_app(config),
+        base_url="http://127.0.0.1:8000",
+        raise_server_exceptions=False,
+    ) as cliente:
+        yield config, cliente, leccion
+
+
+def _fuera(tmp_path):
+    fuera = tmp_path / "fuera"
+    fuera.mkdir()
+    (fuera / "a.mov").write_bytes(_video(64))
+    (fuera / "a.mov.json").write_text("victima", encoding="utf-8")
+    return fuera
+
+
+def test_entregas_enlazada_fuera_da_503_sin_rutas(entregas_sin_excepciones, tmp_path):
+    _, cliente, leccion = entregas_sin_excepciones
+    fuera = _fuera(tmp_path)
+    grabaciones = leccion / "grabaciones"
+    grabaciones.mkdir()
+    (grabaciones / "entregas").symlink_to(fuera)
+
+    listado = cliente.get(RUTA_ENTREGAS)
+    acciones = cliente.get("/api/cursos/react/lecciones/4/acciones")
+    borrado = _borrar(cliente, "a.mov")
+
+    assert listado.status_code == 503
+    assert listado.json() == {"detail": "No se han podido leer las tomas entregadas"}
+    assert acciones.status_code == 200
+    assert borrado.status_code == 503
+    assert borrado.json() == {"detail": "No se ha podido borrar la toma"}
+    assert sorted(ruta.name for ruta in fuera.iterdir()) == ["a.mov", "a.mov.json"]
+
+
+def test_analisis_enlazado_fuera_da_503_al_borrar(entregas_sin_excepciones, tmp_path):
+    _, cliente, leccion = entregas_sin_excepciones
+    fuera = _fuera(tmp_path)
+    carpeta = leccion / "grabaciones" / "entregas"
+    assert _subir(cliente, "a.mov", _video(64)).status_code == 201
+    (carpeta / ".analisis").symlink_to(fuera)
+
+    borrado = _borrar(cliente, "a.mov")
+
+    assert borrado.status_code == 503
+    assert borrado.json() == {"detail": "No se ha podido borrar la toma"}
+    assert (carpeta / "a.mov").is_file()
+    assert (fuera / "a.mov.json").read_text(encoding="utf-8") == "victima"

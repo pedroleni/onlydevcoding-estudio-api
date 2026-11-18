@@ -24,7 +24,7 @@ def _candidato(**cambios):
 def _toma(archivo, **cambios):
     toma = {
         "archivo": archivo,
-        "bytes": 16,
+        "bytes": len(b"video-ficticio"),
         "orientacion": "horizontal",
         "duracion": 5.0,
         "texto": "Texto reconocido ficticio.",
@@ -265,3 +265,42 @@ def test_leer_propuesta_acepta_candidato_de_gancho_con_clave_cues(cfg):
 
     assert leida is not None
     assert [entrada.archivo for entrada in leida.archivos] == ["gancho.mov"]
+
+
+def _escribir_propuesta(entregas, tomas):
+    (entregas / "propuesta.json").write_text(
+        json.dumps({"version": 1, "guion": "react-04", "archivos": tomas}),
+        encoding="utf-8",
+    )
+
+
+def test_leer_propuesta_admite_el_redondeo_de_la_herramienta(cfg):
+    entregas = _preparar_guion_y_entregas(cfg)
+    for nombre in ("hasta.mov", "cue.mov", "lejos.mov", "cue-lejos.mov"):
+        (entregas / nombre).write_bytes(b"video-ficticio")
+    _escribir_propuesta(
+        entregas,
+        [
+            _toma("hasta.mov", candidatos=[_candidato(hasta=5.005)]),
+            _toma("cue.mov", candidatos=[_candidato(cues=[0.0, 1.5, 5.005])]),
+            _toma("lejos.mov", candidatos=[_candidato(hasta=5.006)]),
+            _toma("cue-lejos.mov", candidatos=[_candidato(cues=[0.0, 1.5, 5.01])]),
+        ],
+    )
+
+    leida = leer_propuesta(cfg, "react", 4)
+
+    assert leida is not None
+    assert [toma.archivo for toma in leida.archivos] == ["hasta.mov", "cue.mov"]
+
+
+def test_leer_propuesta_descarta_la_entrada_de_otro_archivo_con_el_mismo_nombre(cfg):
+    entregas = _preparar_guion_y_entregas(cfg)
+    (entregas / "mismo.mov").write_bytes(b"video-ficticio")
+    (entregas / "cambiado.mov").write_bytes(b"otro video mas largo")
+    _escribir_propuesta(entregas, [_toma("mismo.mov"), _toma("cambiado.mov")])
+
+    leida = leer_propuesta(cfg, "react", 4)
+
+    assert leida is not None
+    assert [toma.archivo for toma in leida.archivos] == ["mismo.mov"]

@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from estudio_api.config import Config
-from estudio_api.entregas import listar_entregas
+from estudio_api.entregas import PATRON_ARCHIVO_ENTREGA, listar_entregas
 from estudio_api.estado import ruta_toma_voz
 from estudio_api.lectura import (
     PATRON_PREVIA,
@@ -54,6 +54,8 @@ IdAccion = Literal[
 
 PATRON_ID_SHORT = re.compile(r"^[a-z0-9-]{1,60}$")
 PATRON_ID_ESCENA = re.compile(r"^E\d{2}$")
+# Subcarpeta de ``grabaciones/videos/`` de las tomas colocadas a mano.
+PATRON_SUBCARPETA_ORIGINALES = re.compile(r"^[a-z0-9-]+$")
 PROGRESO_NINGUNO = re.compile(r"(?!)")
 
 SIN_GUION = "Esta lección aún no tiene guion"
@@ -66,6 +68,10 @@ CARPETA_PREVIA_NO_PREPARABLE = "No se puede preparar la carpeta de la vista prev
 ACCIONES_QUE_LEEN_LA_LECCION = frozenset(
     {"alinear-voz", "preparar-montaje", "preparar-shorts", "identificar-tomas"}
 )
+# ``identificar-tomas`` lee los vídeos de ``grabaciones/entregas/``.
+ACCIONES_QUE_LEEN_LAS_ENTREGAS = frozenset({"identificar-tomas"})
+# Las tomas de voz (``grabaciones/E<NN>.wav``) no las lee ``identificar-tomas``.
+ACCIONES_QUE_LEEN_LA_VOZ = ACCIONES_QUE_LEEN_LA_LECCION - ACCIONES_QUE_LEEN_LAS_ENTREGAS
 
 ETIQUETAS: dict[IdAccion, str] = {
     "alinear-voz": "Alinear la voz",
@@ -467,14 +473,43 @@ def _escenas_camara(contexto: _Contexto) -> list[dict[str, Any]]:
     ]
 
 
+def _partes_original(original: str) -> tuple[str, ...] | None:
+    """``grabaciones/videos/[<subcarpeta>/]<vídeo>`` o ``None``."""
+    partes = tuple(original.split("/"))
+    if len(partes) not in {3, 4} or partes[:2] != ("grabaciones", "videos"):
+        return None
+    if len(partes) == 4 and PATRON_SUBCARPETA_ORIGINALES.fullmatch(partes[2]) is None:
+        return None
+    if PATRON_ARCHIVO_ENTREGA.fullmatch(partes[-1]) is None:
+        return None
+    return partes
+
+
 def _original_camara(contexto: _Contexto, escena: dict[str, Any]) -> Path | None:
+    """Ruta del vídeo original de una escena de cámara, sin enlaces.
+
+    ``toma.original`` sale del guion: solo vale un vídeo regular dentro de
+    ``grabaciones/videos/`` (o una subcarpeta suya), nunca otro archivo.
+    """
     toma = escena.get("toma")
     original = toma.get("original") if isinstance(toma, dict) else None
     if not isinstance(original, str):
         return None
+    partes = _partes_original(original)
+    if partes is None:
+        return None
     try:
-        ruta = ruta_segura(contexto.carpeta.resolve(), original)
-        return ruta if ruta.is_file() else None
+        raiz = contexto.carpeta.resolve()
+        literal = raiz.joinpath(*partes)
+        if ruta_segura(raiz, *partes) != literal:
+            return None
+        actual = raiz
+        for parte in partes:
+            actual /= parte
+            datos = os.lstat(actual)
+            if stat.S_ISLNK(datos.st_mode):
+                return None
+        return literal if stat.S_ISREG(datos.st_mode) else None
     except OSError, ValueError:
         return None
 
@@ -633,7 +668,7 @@ def _evaluar_identificar_tomas(
             contexto.curso,
             contexto.numero,
         )
-    except OSError:
+    except OSError, ValueError:
         entregas = None
     if not entregas:
         return _no_disponible("No hay tomas entregadas")

@@ -9,12 +9,12 @@ from starlette.requests import ClientDisconnect
 
 from estudio_api.acciones import (
     ACCIONES_QUE_LEEN_LA_LECCION,
+    ACCIONES_QUE_LEEN_LA_VOZ,
     SIN_GUION,
     AccionNoDisponible,
     OpcionesAccion,
     plan_accion,
 )
-from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
 from estudio_api.guion_textos import (
     CambiosTextos,
@@ -30,6 +30,7 @@ from estudio_api.rutas_api import (
     NumeroLeccion,
     TrabajoId,
     config_peticion,
+    exigir_leccion_libre,
 )
 from estudio_api.teleprompter import (
     Teleprompter,
@@ -43,31 +44,14 @@ from estudio_api.tomas import (
     WavInvalido,
     guardar_toma,
 )
-from estudio_api.trabajos import Trabajo, hay_trabajo_en_leccion, leer_trabajo
+from estudio_api.trabajos import Trabajo, leer_trabajo
 
 router = APIRouter(prefix="/api")
 EscenaId = Annotated[str, Path(pattern=r"^E[0-9]{2}$")]
-LECCION_OCUPADA = (
-    "No se puede cambiar mientras se prepara esta lección. "
-    "Espera a que termine el trabajo."
-)
 
 
 class PeticionPrevia(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-def _exigir_leccion_libre(config: Config, curso: str, numero: int) -> None:
-    """409 si una herramienta está leyendo el guion o las tomas de la lección."""
-    with closing(abrir_bd(config.bd_ruta)) as bd:
-        ocupada = hay_trabajo_en_leccion(
-            bd,
-            curso,
-            numero,
-            ACCIONES_QUE_LEEN_LA_LECCION,
-        )
-    if ocupada:
-        raise HTTPException(status_code=409, detail=LECCION_OCUPADA)
 
 
 @router.get(
@@ -105,7 +89,8 @@ def guardar_textos_guion(
     if not cambios.escenas and cambios.ganchos is None:
         raise HTTPException(status_code=422, detail="No hay cambios que guardar")
     with cerrojo_escritura_guion():
-        _exigir_leccion_libre(config, curso, numero)
+        # Ninguna herramienta que lea el guion puede estar en marcha.
+        exigir_leccion_libre(config, curso, numero, ACCIONES_QUE_LEEN_LA_LECCION)
         leido = datos_curso(config, curso)
         datos_guion = leido[2].get(numero) if leido is not None else None
         if datos_guion is None:
@@ -156,7 +141,10 @@ async def subir_toma_voz(
     longitud = int(request.headers["content-length"])
     config = config_peticion(request)
     # Antes de leer el cuerpo: no tiene sentido recibir la toma para nada.
-    await run_in_threadpool(_exigir_leccion_libre, config, curso, numero)
+    # ``identificar-tomas`` no lee las tomas de voz, así que no la bloquea.
+    await run_in_threadpool(
+        exigir_leccion_libre, config, curso, numero, ACCIONES_QUE_LEEN_LA_VOZ
+    )
     try:
         return await guardar_toma(
             config,

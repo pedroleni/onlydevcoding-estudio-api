@@ -97,7 +97,10 @@ def _preparar(cfg, tomas: list[dict]) -> tuple[Path, Path]:
     analisis.mkdir(parents=True)
     for toma in tomas:
         archivo = toma["archivo"]
-        (entregas / archivo).write_bytes(f"video:{archivo}".encode())
+        contenido = f"video:{archivo}".encode()
+        (entregas / archivo).write_bytes(contenido)
+        # La propuesta solo vale para el archivo que se analizó (mismo tamaño).
+        toma["bytes"] = len(contenido)
         (analisis / f"{archivo}.json").write_text(
             '[{"t":"texto","desde":0.1,"dura":0.5}]',
             encoding="utf-8",
@@ -790,3 +793,125 @@ def test_post_colocar_leccion_inexistente_devuelve_404(cfg):
 
     assert respuesta.status_code == 404
     assert respuesta.json()["detail"] == "La lección no existe"
+
+
+def _shorts_a_mano(cfg, datos: dict) -> Path:
+    ruta = cfg.estudio_dir / "shorts" / "l4" / "shorts.json"
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(
+        json.dumps(datos, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return ruta
+
+
+def test_coloca_gancho_en_shorts_hecho_a_mano_sin_ganchos_entregados(cfg):
+    archivo = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma(archivo, "vertical")])
+    existente = {
+        "leccion": "react-04",
+        "numero": 4,
+        "realceGancho": {"color": "#ffcc00", "desde": 0.5},
+        "tomas": {"AAAA0001": "Toma ficticia hecha a mano."},
+        "frases": {"AAAA0001": [{"t": "frase ficticia", "desde": 0.1}]},
+        "shorts": [{"id": "short-ficticio", "tomas": ["AAAA0001"]}],
+    }
+    shorts = _shorts_a_mano(cfg, existente)
+
+    resultado = _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    guardado = json.loads(shorts.read_text(encoding="utf-8"))
+    assert resultado.ganchos == 1
+    assert guardado["ganchosEntregados"] == {"S2": "0A1B2C3D"}
+    assert guardado["tomas"] == {
+        "AAAA0001": "Toma ficticia hecha a mano.",
+        "0A1B2C3D": "Gancho ficticio.",
+    }
+    for clave in ("leccion", "numero", "realceGancho", "frases", "shorts"):
+        assert guardado[clave] == existente[clave]
+    assert set(guardado) == {*existente, "ganchosEntregados"}
+
+
+def test_ganchos_entregados_que_no_es_objeto_da_503_sin_tocar_nada(cfg):
+    archivo = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma(archivo, "vertical")])
+    _shorts_a_mano(
+        cfg,
+        {"leccion": "react-04", "numero": 4, "tomas": {}, "ganchosEntregados": []},
+    )
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo=archivo, destino="S2")])
+
+    assert captura.value.estado_http == 503
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+
+def test_tiempos_redondeados_se_limitan_a_la_duracion_en_el_guion(cfg):
+    toma = _toma("toma-a.mov")
+    toma["candidatos"][0]["hasta"] = 5.005
+    toma["candidatos"][0]["cues"] = [0.25, 5.004]
+    guion, _ = _preparar(cfg, [toma])
+
+    _colocar(cfg, [Asignacion(archivo="toma-a.mov", destino="E17")])
+
+    escrita = json.loads(guion.read_text(encoding="utf-8"))["escenas"][0]["toma"]
+    assert escrita["hasta"] == 5.0
+    assert escrita["cues"] == [0.25, 5.0]
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["linea1\nlinea2", "aviso\x07", "invertido\u202eoculto", "tab\tseparado"],
+)
+def test_texto_de_cierre_no_valido_da_422_sin_tocar_nada(cfg, texto):
+    toma = _toma("cierre.mov", "vertical")
+    toma["texto"] = texto
+    _preparar(cfg, [toma])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, [Asignacion(archivo="cierre.mov", destino="cierre")])
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "El texto de la toma no es válido"
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+
+def test_cierre_no_pisa_el_texto_corregido_a_mano(cfg):
+    archivo = "cierre.mov"
+    identificador = id_toma_vertical(archivo)
+    toma = _toma(archivo, "vertical")
+    toma["texto"] = "Transcripción automática ficticia."
+    _preparar(cfg, [toma])
+    shorts = _shorts_a_mano(
+        cfg,
+        {
+            "leccion": "react-04",
+            "numero": 4,
+            "tomas": {identificador: "Texto ficticio corregido a mano."},
+            "ganchosEntregados": {},
+        },
+    )
+
+    _colocar(cfg, [Asignacion(archivo=archivo, destino="cierre")])
+
+    guardado = json.loads(shorts.read_text(encoding="utf-8"))
+    assert guardado["tomas"] == {identificador: "Texto ficticio corregido a mano."}
+
+
+def test_fallo_de_ruta_al_limpiar_analisis_no_impide_responder(
+    cfg, monkeypatch, caplog
+):
+    _preparar(cfg, [_toma("toma-a.mov")])
+
+    def ruta_fuera(*_args, **_kwargs):
+        raise ValueError("La ruta sale de la raíz")
+
+    monkeypatch.setattr(modulo_colocar, "_limpiar_analisis", ruta_fuera)
+
+    with caplog.at_level("WARNING", logger="estudio_api.colocar"):
+        resultado = _colocar(cfg, [Asignacion(archivo="toma-a.mov", destino="E17")])
+
+    assert resultado.colocadas[0].destino == "E17"
+    assert "No se pudo limpiar el análisis de una toma" in caplog.text

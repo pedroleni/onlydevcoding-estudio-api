@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from estudio_api.config import Config
-from estudio_api.estado import _es_archivo, _ruta_de_leccion
+from estudio_api.estado import _ruta_de_leccion
 from estudio_api.lectura import (
     _leer_json,
     _ruta_publica,
@@ -96,6 +96,27 @@ def _entregados(config: Config, numero: int, guion: str) -> dict[str, str]:
     }
 
 
+def _mejorada(
+    config: Config,
+    carpeta: Path | None,
+    identificador: str,
+    version_publica: int | None,
+) -> bool:
+    """La copia de ``mejorar-toma`` es de la toma que se ve ahora.
+
+    Colocar otra toma sustituye el vídeo público pero deja la copia vieja en
+    ``grabaciones/videos/ia/``: solo cuenta si no es anterior al vídeo público.
+    """
+    if carpeta is None or version_publica is None:
+        return False
+    partes = ("grabaciones", "videos", "ia", f"{identificador}.mov")
+    ruta = _ruta_de_leccion(config, carpeta, *partes)
+    if ruta is None or ruta != carpeta.resolve().joinpath(*partes):
+        return False
+    version = _mtime_archivo_regular(ruta)
+    return version is not None and version >= version_publica
+
+
 def _color_vigente(config: Config, numero: int, toma: str, version_mov: int) -> bool:
     try:
         ruta = ruta_segura(
@@ -127,9 +148,6 @@ def _escenas(
         video = _video_publico(
             config, "public", "grabaciones", guion_id, f"{identificador}.mov"
         )
-        ia = _ruta_de_leccion(
-            config, carpeta, "grabaciones", "videos", "ia", f"{identificador}.mov"
-        )
         escenas.append(
             EscenaCamara(
                 id=identificador,
@@ -137,7 +155,9 @@ def _escenas(
                 video=video[0] if video else None,
                 version=video[1] if video else None,
                 original=_nombre_original(datos.get("toma")),
-                mejorada=_es_archivo(ia),
+                mejorada=_mejorada(
+                    config, carpeta, identificador, video[1] if video else None
+                ),
             )
         )
     return escenas

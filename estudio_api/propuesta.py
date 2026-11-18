@@ -18,6 +18,9 @@ from estudio_api.entregas import (
 from estudio_api.lectura import MAX_TAMANO_JSON, datos_curso
 
 PATRON_ESCENA_CAMARA = re.compile(r"^E[0-9]{2}$")
+# ``identificar-tomas`` redondea los tiempos a 2 decimales: un ``hasta`` o un
+# cue pueden pasarse de la duración hasta media centésima.
+TOLERANCIA_DURACION = 0.005
 _SIN_DATOS = object()
 NumeroEstricto = Annotated[
     float,
@@ -83,11 +86,13 @@ class TomaPropuesta(BaseModel):
             for destino in destinos
         ):
             raise ValueError("La orientación no coincide con el destino")
+        # Margen de coma flotante: 5.0 + 0.005 no es exactamente 5.005.
+        limite = self.duracion + TOLERANCIA_DURACION + 1e-9
         for candidato in self.candidatos:
-            if candidato.desde > candidato.hasta or candidato.hasta > self.duracion:
+            if candidato.desde > candidato.hasta or candidato.hasta > limite:
                 raise ValueError("Los tiempos no están dentro de la duración")
             if candidato.cues is not None and any(
-                cue < 0 or cue > self.duracion for cue in candidato.cues
+                cue < 0 or cue > limite for cue in candidato.cues
             ):
                 raise ValueError("Los cues no están dentro de la duración")
         return self
@@ -211,7 +216,7 @@ def leer_propuesta(
     try:
         carpeta = carpeta_entregas(config, curso, numero, datos=leido)
         entregadas = listar_entregas(config, curso, numero, datos=leido)
-    except OSError:
+    except OSError, ValueError:
         return None
     if carpeta is None or entregadas is None:
         return None
@@ -225,7 +230,7 @@ def leer_propuesta(
     ):
         return None
 
-    archivos_en_disco = {entrega.archivo for entrega in entregadas}
+    tamanos_en_disco = {entrega.archivo: entrega.bytes for entrega in entregadas}
     camara, ganchos = destinos_guion(guion)
     archivos: list[TomaPropuesta] = []
     nombres_vistos: set[str] = set()
@@ -239,7 +244,8 @@ def leer_propuesta(
             toma = TomaPropuesta.model_validate(datos_toma)
         except TypeError, ValidationError:
             continue
-        if toma.archivo not in archivos_en_disco:
+        # Un vídeo nuevo con el nombre de otro ya analizado no hereda su análisis.
+        if tamanos_en_disco.get(toma.archivo) != toma.bytes:
             continue
         if not _toma_valida_para_guion(toma, camara, ganchos):
             continue

@@ -22,6 +22,7 @@ from estudio_api.guion_textos import (
     ConflictoEscrituraGuion,
     cerrojo_escritura_guion,
     escribir_json_versionado,
+    validar_texto_toma,
     version_json,
 )
 from estudio_api.lectura import MAX_TAMANO_JSON, datos_curso
@@ -150,11 +151,14 @@ def _leer_shorts(
     datos = json.loads(contenido.decode("utf-8"))
     if not isinstance(datos, dict):
         raise OSError("shorts.json no contiene un objeto")
-    tomas = datos.get("tomas")
-    entregados = datos.get("ganchosEntregados")
-    if not isinstance(tomas, dict) or not isinstance(entregados, dict):
+    datos = copy.deepcopy(datos)
+    # Los ``shorts.json`` hechos a mano no traen ``ganchosEntregados``.
+    datos.setdefault("ganchosEntregados", {})
+    if not isinstance(datos.get("tomas"), dict) or not isinstance(
+        datos["ganchosEntregados"], dict
+    ):
         raise OSError("shorts.json no tiene la estructura esperada")
-    return copy.deepcopy(datos), version
+    return datos, version
 
 
 def _escribir_propuesta(ruta: Path, datos: dict[str, Any]) -> None:
@@ -222,6 +226,16 @@ def _prevalidar(
         if destino != "cierre" and destino in destinos_vistos:
             raise ColocacionNoValida(422, "Hay dos tomas para el mismo destino")
         destinos_vistos.add(destino)
+        texto_vertical: str | None = None
+        if destino == "cierre":
+            try:
+                texto_vertical = validar_texto_toma(toma.texto)
+            except ValueError as error:
+                raise ColocacionNoValida(
+                    422, "El texto de la toma no es válido"
+                ) from error
+        elif es_gancho:
+            texto_vertical = ganchos[destino]
         candidato = None
         if es_camara:
             candidato = next(
@@ -240,13 +254,7 @@ def _prevalidar(
                 destino=destino,
                 candidato=candidato,
                 id_vertical=None if es_camara else id_toma_vertical(toma.archivo),
-                texto_vertical=(
-                    None
-                    if es_camara
-                    else toma.texto
-                    if destino == "cierre"
-                    else ganchos[destino]
-                ),
+                texto_vertical=texto_vertical,
             )
         )
     return planes
@@ -625,17 +633,23 @@ def _colocar_tomas(
                 or plan.texto_vertical is None
             ):
                 raise OSError("Faltan los datos de la toma vertical")
-            shorts["tomas"][plan.id_vertical] = plan.texto_vertical
-            if plan.destino != "cierre":
+            if plan.destino == "cierre":
+                # Los ids de cierre se repiten entre lecciones y su texto se
+                # corrige a mano: si ya está, se respeta.
+                shorts["tomas"].setdefault(plan.id_vertical, plan.texto_vertical)
+            else:
+                shorts["tomas"][plan.id_vertical] = plan.texto_vertical
                 shorts["ganchosEntregados"][plan.destino] = plan.id_vertical
             continue
         candidato = plan.candidato
+        duracion = plan.toma.duracion
         escenas[plan.destino]["toma"] = {
             "original": f"grabaciones/videos/{plan.toma.archivo}",
             "video": f"grabaciones/{propuesta.guion}/{plan.destino}.mov",
-            "desde": candidato.desde,
-            "hasta": candidato.hasta,
-            "cues": candidato.cues,
+            # La herramienta redondea a 2 decimales: nunca más allá del vídeo.
+            "desde": min(candidato.desde, duracion),
+            "hasta": min(candidato.hasta, duracion),
+            "cues": [min(cue, duracion) for cue in candidato.cues or []],
         }
 
     version_actual_guion, original_guion = version_json(ruta_guion)
@@ -688,7 +702,7 @@ def _colocar_tomas(
     for plan in planes:
         try:
             _limpiar_analisis(carpeta, plan.toma.archivo)
-        except OSError:
+        except OSError, ValueError:
             logger.warning("No se pudo limpiar el análisis de una toma", exc_info=True)
     try:
         _actualizar_propuesta(config, curso, numero, datos, carpeta, propuesta, planes)
