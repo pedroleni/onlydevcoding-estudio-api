@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -271,6 +272,26 @@ def test_guardar_los_mismos_textos_conserva_los_bytes(textos_guion):
 
     assert respuesta.status_code == 200
     assert ruta.read_bytes() == bytes_originales
+
+
+@pytest.mark.parametrize(
+    "cues",
+    [
+        ["Primera frase.", "Segunda frase."],
+        ["  Primera frase.", "Segunda frase.  "],
+    ],
+)
+def test_guardar_sin_cambios_no_escribe_ni_copia(textos_guion, cues):
+    cliente, ruta, _, bytes_originales = textos_guion
+    os.utime(ruta, ns=(1_000_000_000, 1_000_000_000))
+
+    respuesta = _guardar(cliente, _version(cliente), [{"id": "E03", "cues": cues}])
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["version"] == hashlib.sha256(bytes_originales).hexdigest()
+    assert ruta.read_bytes() == bytes_originales
+    assert ruta.stat().st_mtime_ns == 1_000_000_000
+    assert not ruta.with_name(f"{ruta.name}.antes-de-editar").exists()
 
 
 def test_aplicar_textos_es_una_funcion_pura(textos_guion):

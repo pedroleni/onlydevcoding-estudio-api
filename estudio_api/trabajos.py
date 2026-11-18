@@ -5,9 +5,10 @@ import os
 import re
 import signal
 import sqlite3
+import stat
 import subprocess
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -79,6 +80,16 @@ class PlanTrabajo:
     patron_progreso: re.Pattern[str] = PROGRESO_REMOTION
     tiempo_maximo: float = TIEMPO_MAXIMO_RENDER
     mensajes: Mensajes = MENSAJES_REMOTION
+    # Prepara la carpeta del resultado y quita el temporal que hubiera. Se
+    # ejecuta dentro de ``lanzar`` con el trabajo ya reservado, así que no
+    # crea ni borra nada si se va a responder «Ya hay un trabajo en marcha».
+    # Si lanza una excepción, no se registra el trabajo y la excepción llega
+    # a quien llamó a ``lanzar``.
+    preparar: Callable[[], None] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass
@@ -165,6 +176,24 @@ def ultimo_trabajo(
         (accion, curso, numero, objetivo),
     ).fetchone()
     return _desde_fila(fila) if fila is not None else None
+
+
+def hay_trabajo_en_leccion(
+    bd: sqlite3.Connection,
+    curso: str,
+    numero: int,
+    acciones: Collection[str],
+) -> bool:
+    """Indica si hay un trabajo ``en_marcha`` de alguna de ``acciones`` en la lección."""
+    filas = bd.execute(
+        """
+        SELECT accion
+        FROM trabajo
+        WHERE estado = 'en_marcha' AND curso = ? AND numero = ?
+        """,
+        (curso, numero),
+    ).fetchall()
+    return any(fila[0] in acciones for fila in filas)
 
 
 def listar_trabajos(bd: sqlite3.Connection, limite: int) -> list[Trabajo]:
@@ -340,33 +369,76 @@ def _marca_archivo() -> str:
     return datetime.now().strftime("%Y%m%dT%H%M%S%f")
 
 
-def _ruta_archivada(destino: Path) -> Path:
+class _InstalacionInsegura(OSError):
+    """El temporal, el destino o ``anteriores/`` no son lo que deben ser."""
+
+
+def _lstat_o_none(ruta: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(ruta)
+    except FileNotFoundError:
+        return None
+
+
+def _exigir_temporal_regular(temporal: Path) -> None:
+    datos = _lstat_o_none(temporal)
+    if datos is None or not stat.S_ISREG(datos.st_mode):
+        raise _InstalacionInsegura("El temporal no es un archivo regular")
+
+
+def _destino_actual(destino: Path) -> os.stat_result | None:
+    """``lstat`` del destino; un enlace o algo que no es un archivo se rechaza."""
+    datos = _lstat_o_none(destino)
+    if datos is not None and not stat.S_ISREG(datos.st_mode):
+        raise _InstalacionInsegura("El destino no es un archivo regular")
+    return datos
+
+
+def _carpeta_anteriores(destino: Path) -> Path:
     anteriores = destino.parent / "anteriores"
-    anteriores.mkdir(parents=True, exist_ok=True)
+    datos = _lstat_o_none(anteriores)
+    if datos is None:
+        anteriores.mkdir()
+        datos = os.lstat(anteriores)
+    if not stat.S_ISDIR(datos.st_mode):
+        raise _InstalacionInsegura("anteriores no es un directorio real")
+    return anteriores
+
+
+def _ruta_archivada(destino: Path) -> Path:
+    anteriores = _carpeta_anteriores(destino)
     base = f"{destino.stem}-{_marca_archivo()}"
     indice = 1
     while True:
         sufijo = "" if indice == 1 else f"-{indice}"
         candidata = anteriores / f"{base}{sufijo}{destino.suffix}"
-        if not candidata.exists():
+        if not os.path.lexists(candidata):
             return candidata
         indice += 1
 
 
 def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
+    """Instala el temporal en su destino sin seguir enlaces simbólicos.
+
+    El temporal tiene que ser un archivo regular y el destino, si existe,
+    también; ``anteriores/`` tiene que ser un directorio real. Si algo no
+    cuadra no se mueve ni se pisa nada.
+    """
     temporal = plan.temporal
     destino = plan.destino
     if temporal is None or destino is None:
         return
+    _exigir_temporal_regular(temporal)
+    destino_existente = _destino_actual(destino)
     if plan.instalar == "reemplazar":
         os.replace(temporal, destino)
         return
     if plan.instalar == "sin_pisar":
-        os.link(temporal, destino)
+        os.link(temporal, destino, follow_symlinks=False)
         _borrar_temporal_sin_fallar(temporal, trabajo_id)
         return
 
-    if not destino.exists():
+    if destino_existente is None:
         os.replace(temporal, destino)
         return
     archivado = _ruta_archivada(destino)
@@ -386,9 +458,8 @@ def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
 
 def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
     with _BLOQUEO:
-        en_curso = _EN_CURSO.get(trabajo_id)
-    if en_curso is None:
-        en_curso = _EnCurso(bd_ruta=bd_ruta, temporal=plan.temporal)
+        # ``lanzar`` lo registra siempre antes de arrancar el hilo.
+        en_curso = _EN_CURSO[trabajo_id]
     registro: list[str] = []
     progreso = 0.0
     proceso: subprocess.Popen[bytes] | None = None
@@ -541,7 +612,7 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
             )
             return
         if codigo != 0:
-            _borrar_temporal(plan.temporal)
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
@@ -646,6 +717,8 @@ def lanzar(
                 for fila in en_marcha
             ):
                 raise TrabajoEnMarcha
+            if plan.preparar is not None:
+                plan.preparar()
             if en_marcha:
                 bd.executemany(
                     """

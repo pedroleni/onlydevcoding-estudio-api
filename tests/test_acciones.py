@@ -1,7 +1,7 @@
 import json
 import os
 import shutil
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -26,15 +26,32 @@ from estudio_api.trabajos import (
     TrabajoEnMarcha,
     esperar,
     leer_trabajo,
+    listar_trabajos,
 )
 from tests.ayudas import TOKEN
 
 CABECERAS = {"X-Estudio-Token": TOKEN}
 RUTA_ACCIONES = "/api/cursos/react/lecciones/4/acciones"
+RUTA_TEXTOS = "/api/cursos/react/lecciones/4/guion/textos"
+RUTA_TOMA = "/api/cursos/react/lecciones/4/grabaciones/E03"
+MENSAJE_LECCION_OCUPADA = (
+    "No se puede cambiar mientras se prepara esta lección. "
+    "Espera a que termine el trabajo."
+)
 
 
 def _marca(ruta: Path, marca: int) -> None:
     os.utime(ruta, ns=(marca, marca))
+
+
+def _estado(catalogo):
+    datos_guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    return estado_montaje(
+        catalogo["config"],
+        "react-04",
+        catalogo["carpeta"],
+        datos_guion,
+    )
 
 
 @pytest.fixture
@@ -124,33 +141,32 @@ def catalogo(cfg):
 
 
 def test_estado_montaje_respeta_prioridad_y_fechas(catalogo):
-    config = catalogo["config"]
-    carpeta = catalogo["carpeta"]
     montaje = catalogo["montaje"]
     toma = catalogo["toma"]
     alineacion = catalogo["alineacion"]
     guion = catalogo["guion"]
+    contenido_montaje = montaje.read_bytes()
 
     montaje.unlink()
-    assert estado_montaje(config, "react-04", carpeta).model_dump() == {
+    assert _estado(catalogo).model_dump() == {
         "estado": "sin_montaje",
         "sin_alinear": [],
     }
 
-    montaje.write_text("{}", encoding="utf-8")
+    montaje.write_bytes(contenido_montaje)
     _marca(montaje, 300)
     _marca(toma, 400)
-    assert estado_montaje(config, "react-04", carpeta).model_dump() == {
+    assert _estado(catalogo).model_dump() == {
         "estado": "voz_sin_alinear",
         "sin_alinear": ["E03"],
     }
 
     _marca(alineacion, 500)
     _marca(guion, 600)
-    assert estado_montaje(config, "react-04", carpeta).estado == "guion_cambiado"
+    assert _estado(catalogo).estado == "guion_cambiado"
 
     _marca(montaje, 700)
-    assert estado_montaje(config, "react-04", carpeta).model_dump() == {
+    assert _estado(catalogo).model_dump() == {
         "estado": "al_dia",
         "sin_alinear": [],
     }
@@ -160,17 +176,12 @@ def test_estado_montaje_respeta_prioridad_y_fechas(catalogo):
 def test_estado_montaje_trata_json_no_objeto_como_sin_montaje(catalogo, contenido):
     catalogo["montaje"].write_text(contenido, encoding="utf-8")
 
-    estado = estado_montaje(
-        catalogo["config"],
-        "react-04",
-        catalogo["carpeta"],
-    )
+    estado = _estado(catalogo)
 
     assert estado.model_dump() == {"estado": "sin_montaje", "sin_alinear": []}
 
 
 def test_estado_montaje_usa_voz_archivo_y_descarta_rutas_invalidas(catalogo):
-    config = catalogo["config"]
     carpeta = catalogo["carpeta"]
     guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
     guion["escenas"].extend(
@@ -195,7 +206,7 @@ def test_estado_montaje_usa_voz_archivo_y_descarta_rutas_invalidas(catalogo):
     _marca(catalogo["montaje"], 700)
     _marca(catalogo["alineacion"], 900)
 
-    estado = estado_montaje(config, "react-04", carpeta)
+    estado = _estado(catalogo)
 
     assert estado.estado == "voz_sin_alinear"
     assert estado.sin_alinear == ["E05"]
@@ -282,6 +293,7 @@ def test_plan_accion_construye_los_siete_comandos_exactos(catalogo, monkeypatch)
     )
     assert planes["video-final"].comando == [
         "/bin/zsh",
+        "-f",
         "herramientas/publicar/sonido-redes.sh",
         str(carpeta / "previa" / "previa-v3.mp4"),
         str(destino_final.with_name(f".{destino_final.stem}.generando.mp4")),
@@ -500,11 +512,24 @@ def test_get_acciones_distingue_leccion_sin_guion(catalogo):
     "accion",
     ["alinear-voz", "preparar-montaje", "previa-grabacion", "render-leccion"],
 )
-def test_post_accion_que_necesita_guion_mantiene_404(catalogo, accion):
+def test_post_accion_en_leccion_sin_guion_da_409(catalogo, accion):
     catalogo["guion"].unlink()
 
     respuesta = catalogo["cliente"].post(
         f"{RUTA_ACCIONES}/{accion}",
+        headers=CABECERAS,
+        json={},
+    )
+
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == "Esta lección aún no tiene guion"
+
+
+def test_post_previa_de_la_fase_4_sin_guion_mantiene_404(catalogo):
+    catalogo["guion"].unlink()
+
+    respuesta = catalogo["cliente"].post(
+        "/api/cursos/react/lecciones/4/previa-grabacion",
         headers=CABECERAS,
         json={},
     )
@@ -621,7 +646,7 @@ def test_post_opcion_invalida_no_lanza(catalogo, monkeypatch):
 
 
 def test_fallo_al_preparar_destino_da_503_y_no_lanza(catalogo, monkeypatch):
-    llamadas = []
+    shutil.rmtree(catalogo["carpeta"] / "publicar" / "1-youtube-leccion")
     mkdir_real = Path.mkdir
 
     def mkdir_con_fallo(ruta, *args, **kwargs):
@@ -630,9 +655,7 @@ def test_fallo_al_preparar_destino_da_503_y_no_lanza(catalogo, monkeypatch):
         return mkdir_real(ruta, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", mkdir_con_fallo)
-    monkeypatch.setattr(
-        "estudio_api.rutas_acciones.lanzar", lambda *args: llamadas.append(args)
-    )
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/bin/falso")
 
     respuesta = catalogo["cliente"].post(
         f"{RUTA_ACCIONES}/video-final",
@@ -644,7 +667,8 @@ def test_fallo_al_preparar_destino_da_503_y_no_lanza(catalogo, monkeypatch):
     assert respuesta.json()["detail"] == (
         "No se puede preparar la carpeta del resultado"
     )
-    assert llamadas == []
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd:
+        assert listar_trabajos(bd, 10) == []
 
 
 @pytest.mark.parametrize(
@@ -810,3 +834,396 @@ def test_cancelar_devuelve_cualquier_trabajo_que_devuelva_el_motor(
 
     assert respuesta.status_code == 200
     assert respuesta.json()["estado"] == "hecho"
+
+
+# --- Ronda final de la fase 5 ---
+
+
+@contextmanager
+def _trabajo_lento(catalogo, monkeypatch, accion):
+    """Lanza ``accion`` con una herramienta falsa que espera a una señal."""
+    config = catalogo["config"]
+    continuar = config.estudio_dir / "continuar"
+    herramienta = config.estudio_dir / "herramienta-lenta"
+    herramienta.write_text(
+        f'#!/bin/sh\nwhile [ ! -e "{continuar}" ]; do sleep 0.02; done\n',
+        encoding="utf-8",
+    )
+    herramienta.chmod(0o700)
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: str(herramienta))
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/{accion}",
+        headers=CABECERAS,
+        json={},
+    )
+    assert respuesta.status_code == 202
+    try:
+        yield respuesta.json()
+    finally:
+        continuar.touch()
+        esperar(respuesta.json()["id"], 5)
+
+
+def _registrar_en_marcha(config, accion, numero=4):
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(config.bd_ruta)) as bd, bd:
+        bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, estado, inicio)
+            VALUES (?, 'react', ?, 'en_marcha', ?)
+            """,
+            (accion, numero, inicio),
+        )
+
+
+def _guardar_textos(cliente, texto):
+    version = cliente.get("/api/cursos/react/lecciones/4/teleprompter").json()[
+        "version"
+    ]
+    return cliente.put(
+        RUTA_TEXTOS,
+        headers=CABECERAS,
+        json={"version": version, "escenas": [{"id": "E03", "cues": [texto]}]},
+    )
+
+
+def test_put_textos_mientras_se_prepara_el_montaje_da_409(catalogo, monkeypatch):
+    cliente = catalogo["cliente"]
+    antes = catalogo["guion"].read_bytes()
+
+    with _trabajo_lento(catalogo, monkeypatch, "preparar-montaje"):
+        respuesta = _guardar_textos(cliente, "Texto cambiado.")
+        assert catalogo["guion"].read_bytes() == antes
+
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == MENSAJE_LECCION_OCUPADA
+    despues = _guardar_textos(cliente, "Texto cambiado.")
+    assert despues.status_code == 200
+    assert catalogo["guion"].read_bytes() != antes
+
+
+@pytest.mark.parametrize(
+    "accion", ["alinear-voz", "preparar-montaje", "preparar-shorts"]
+)
+def test_put_textos_y_toma_con_trabajo_de_la_leccion_dan_409(
+    catalogo, monkeypatch, accion
+):
+    cliente = catalogo["cliente"]
+    _registrar_en_marcha(catalogo["config"], accion)
+    antes = catalogo["guion"].read_bytes()
+    toma_antes = catalogo["toma"].read_bytes()
+
+    async def no_leer_el_cuerpo(*_args, **_kwargs):
+        raise AssertionError("No se debe leer el cuerpo de la toma")
+
+    monkeypatch.setattr(
+        "estudio_api.rutas_teleprompter.guardar_toma", no_leer_el_cuerpo
+    )
+
+    textos = _guardar_textos(cliente, "Texto cambiado.")
+    toma = cliente.put(
+        RUTA_TOMA,
+        headers={**CABECERAS, "Content-Type": "audio/wav"},
+        content=b"RIFF-ficticio",
+    )
+
+    assert textos.status_code == 409
+    assert textos.json()["detail"] == MENSAJE_LECCION_OCUPADA
+    assert toma.status_code == 409
+    assert toma.json()["detail"] == MENSAJE_LECCION_OCUPADA
+    assert catalogo["guion"].read_bytes() == antes
+    assert catalogo["toma"].read_bytes() == toma_antes
+
+
+@pytest.mark.parametrize(
+    ("accion", "numero"),
+    [("render-leccion", 4), ("video-final", 4), ("preparar-montaje", 5)],
+)
+def test_otros_trabajos_no_bloquean_los_textos(catalogo, accion, numero):
+    _registrar_en_marcha(catalogo["config"], accion, numero)
+
+    respuesta = _guardar_textos(catalogo["cliente"], "Texto cambiado.")
+
+    assert respuesta.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("enlace", "accion", "opciones"),
+    [
+        (("previa",), "render-leccion", {}),
+        (("shorts",), "render-short", {"short": "short-falso-1"}),
+        (("publicar",), "video-final", {"previa": "previa-v3.mp4"}),
+        (
+            ("publicar", "1-youtube-leccion"),
+            "video-final",
+            {"previa": "previa-v3.mp4"},
+        ),
+    ],
+)
+def test_carpeta_de_resultado_enlazada_dentro_de_la_raiz_da_503(
+    catalogo, monkeypatch, enlace, accion, opciones
+):
+    carpeta = catalogo["carpeta"]
+    otra = carpeta.parent / "05-otra" / "-".join(enlace)
+    ruta = carpeta.joinpath(*enlace)
+    if ruta.exists():
+        shutil.copytree(ruta, otra)
+        shutil.rmtree(ruta)
+    else:
+        otra.mkdir()
+    ruta.symlink_to(otra, target_is_directory=True)
+    contenido_otra = sorted(p.name for p in otra.rglob("*"))
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/bin/falso")
+
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/{accion}",
+        headers=CABECERAS,
+        json=opciones,
+    )
+
+    assert respuesta.status_code == 503
+    assert respuesta.json()["detail"] == (
+        "No se puede preparar la carpeta del resultado"
+    )
+    assert sorted(p.name for p in otra.rglob("*")) == contenido_otra
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd:
+        assert listar_trabajos(bd, 10) == []
+
+
+@pytest.mark.parametrize(
+    ("accion", "opciones", "carpeta_resultado", "temporal", "destino"),
+    [
+        (
+            "render-short",
+            {"short": "short-falso-1"},
+            "shorts",
+            ".short-falso-1.generando.mp4",
+            "short-falso-1.mp4",
+        ),
+        (
+            "render-leccion",
+            {},
+            "previa",
+            ".previa-v4.generando.mp4",
+            "previa-v4.mp4",
+        ),
+    ],
+)
+def test_temporal_plantado_como_enlace_se_quita_antes_de_lanzar(
+    catalogo, monkeypatch, accion, opciones, carpeta_resultado, temporal, destino
+):
+    config = catalogo["config"]
+    fuera = config.cursos_dir.parent / "archivo-ajeno.txt"
+    fuera.write_bytes(b"archivo ajeno")
+    directorio = catalogo["carpeta"] / carpeta_resultado
+    directorio.mkdir(exist_ok=True)
+    (directorio / temporal).symlink_to(fuera)
+    npx_falso = config.estudio_dir / "npx-falso"
+    npx_falso.write_text('#!/bin/sh\nprintf video-nuevo > "$6"\n', encoding="utf-8")
+    npx_falso.chmod(0o700)
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: str(npx_falso))
+
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/{accion}",
+        headers=CABECERAS,
+        json=opciones,
+    )
+    assert respuesta.status_code == 202
+    esperar(respuesta.json()["id"], 5)
+
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        assert leer_trabajo(bd, respuesta.json()["id"]).estado == "hecho"
+    assert fuera.read_bytes() == b"archivo ajeno"
+    assert not (directorio / destino).is_symlink()
+    assert (directorio / destino).read_bytes() == b"video-nuevo"
+    assert not os.path.lexists(directorio / temporal)
+
+
+def test_video_final_con_anteriores_enlazado_fuera_no_mueve_nada(catalogo, monkeypatch):
+    config = catalogo["config"]
+    youtube = catalogo["carpeta"] / "publicar" / "1-youtube-leccion"
+    final = youtube / "curso-react-04-importar-y-exportar.mp4"
+    final.write_bytes(b"final anterior")
+    fuera = config.cursos_dir.parent / "carpeta-ajena"
+    fuera.mkdir()
+    (youtube / "anteriores").symlink_to(fuera, target_is_directory=True)
+    script = config.estudio_dir / "herramientas" / "publicar" / "sonido-redes.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text('printf final-nuevo > "$2"\n', encoding="utf-8")
+
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/video-final",
+        headers=CABECERAS,
+        json={"previa": "previa-v3.mp4"},
+    )
+    assert respuesta.status_code == 202
+    esperar(respuesta.json()["id"], 5)
+
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        trabajo = leer_trabajo(bd, respuesta.json()["id"])
+    assert trabajo.estado == "error"
+    assert trabajo.error == "No se pudo guardar el resultado"
+    assert final.read_bytes() == b"final anterior"
+    assert list(fuera.iterdir()) == []
+    assert not os.path.lexists(
+        youtube / ".curso-react-04-importar-y-exportar.generando.mp4"
+    )
+
+
+def test_video_final_instala_y_archiva_con_zsh_sin_configuracion(catalogo, monkeypatch):
+    config = catalogo["config"]
+    youtube = catalogo["carpeta"] / "publicar" / "1-youtube-leccion"
+    final = youtube / "curso-react-04-importar-y-exportar.mp4"
+    final.write_bytes(b"final anterior")
+    script = config.estudio_dir / "herramientas" / "publicar" / "sonido-redes.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text('printf final-nuevo > "$2"\n', encoding="utf-8")
+
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/video-final",
+        headers=CABECERAS,
+        json={"previa": "previa-v3.mp4"},
+    )
+    assert respuesta.status_code == 202
+    esperar(respuesta.json()["id"], 5)
+
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        assert leer_trabajo(bd, respuesta.json()["id"]).estado == "hecho"
+    assert final.read_bytes() == b"final-nuevo"
+    archivados = list((youtube / "anteriores").iterdir())
+    assert [ruta.read_bytes() for ruta in archivados] == [b"final anterior"]
+
+
+def test_nombres_ocultos_no_cuentan_como_video_final_previa_ni_short(catalogo):
+    cliente = catalogo["cliente"]
+    carpeta = catalogo["carpeta"]
+    youtube = carpeta / "publicar" / "1-youtube-leccion"
+    for ruta in youtube.glob("*.mp4"):
+        ruta.unlink()
+    (youtube / ".curso-react-04-importar-y-exportar.generando.mp4").write_bytes(
+        b"a medias"
+    )
+    (carpeta / "previa" / ".previa-v4.generando.mp4").write_bytes(b"a medias")
+    verticales = carpeta / "publicar" / "2-shorts-y-reels"
+    (verticales / ".short-9-oculto.mp4").write_bytes(b"a medias")
+    (verticales / ".reel-oculto.mp4").write_bytes(b"a medias")
+
+    ficha = cliente.get("/api/cursos/react/lecciones/4").json()
+    piezas = {pieza["id"]: pieza for pieza in ficha["piezas"]}
+    acciones = {accion["id"]: accion for accion in cliente.get(RUTA_ACCIONES).json()}
+
+    assert ficha["estado"]["video_final"] is False
+    assert piezas["leccion"]["video"] is None
+    assert all("/." not in (pieza["video"] or "") for pieza in ficha["piezas"])
+    assert [ruta.rsplit("/", 1)[1] for ruta in ficha["previas"]] == [
+        "previa-v1.mp4",
+        "previa-v3.mp4",
+    ]
+    assert ficha["estado"]["previa"].endswith("/previa-v3.mp4")
+    assert acciones["video-final"]["opciones"] == ["previa-v1.mp4", "previa-v3.mp4"]
+
+    (youtube / "curso-react-04-importar-y-exportar.mp4").write_bytes(b"final")
+    ficha = cliente.get("/api/cursos/react/lecciones/4").json()
+    piezas = {pieza["id"]: pieza for pieza in ficha["piezas"]}
+
+    assert ficha["estado"]["video_final"] is True
+    assert piezas["leccion"]["video"].endswith(
+        "/1-youtube-leccion/curso-react-04-importar-y-exportar.mp4"
+    )
+
+
+def test_sin_montaje_tambien_lista_la_voz_sin_alinear(catalogo):
+    catalogo["montaje"].unlink()
+    _marca(catalogo["toma"], 400)
+
+    assert _estado(catalogo).model_dump() == {
+        "estado": "sin_montaje",
+        "sin_alinear": ["E03"],
+    }
+    ficha = catalogo["cliente"].get("/api/cursos/react/lecciones/4").json()
+    assert ficha["montaje"] == {"estado": "sin_montaje", "sin_alinear": ["E03"]}
+
+
+def test_preparar_shorts_exige_el_montaje_de_la_leccion(catalogo, monkeypatch):
+    catalogo["montaje"].unlink()
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: "/bin/falso")
+
+    acciones = {
+        accion["id"]: accion for accion in catalogo["cliente"].get(RUTA_ACCIONES).json()
+    }
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/preparar-shorts",
+        headers=CABECERAS,
+        json={},
+    )
+
+    assert acciones["preparar-shorts"]["disponible"] is False
+    assert acciones["preparar-shorts"]["motivo"] == (
+        "Prepara antes el montaje de la lección"
+    )
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == "Prepara antes el montaje de la lección"
+
+
+@pytest.mark.parametrize(
+    "contenido",
+    [
+        "{}",
+        '{"fps": 30, "duracion": 30, "escenas": [{"id": "E99", "duracion": 30}]}',
+    ],
+)
+def test_un_montaje_danado_es_sin_montaje_en_estado_previa_y_render(
+    catalogo, contenido
+):
+    catalogo["montaje"].write_text(contenido, encoding="utf-8")
+    _marca(catalogo["montaje"], 300)
+
+    ficha = catalogo["cliente"].get("/api/cursos/react/lecciones/4").json()
+    acciones = {
+        accion["id"]: accion for accion in catalogo["cliente"].get(RUTA_ACCIONES).json()
+    }
+
+    assert _estado(catalogo).estado == "sin_montaje"
+    assert ficha["montaje"]["estado"] == "sin_montaje"
+    for accion in ("previa-grabacion", "render-leccion"):
+        assert acciones[accion]["disponible"] is False
+        assert acciones[accion]["motivo"] == "Esta lección aún no tiene montaje"
+    assert acciones["preparar-shorts"]["motivo"] == (
+        "Prepara antes el montaje de la lección"
+    )
+
+
+def test_cancelar_un_trabajo_que_no_existe_da_404(catalogo):
+    respuesta = catalogo["cliente"].post(
+        "/api/trabajos/999/cancelar",
+        headers=CABECERAS,
+        json={},
+    )
+
+    assert respuesta.status_code == 404
+    assert respuesta.json()["detail"] == "El trabajo no existe"
+
+
+def test_con_otro_trabajo_en_marcha_no_se_crea_ni_se_borra_nada(catalogo, monkeypatch):
+    carpeta = catalogo["carpeta"]
+    youtube = carpeta / "publicar" / "1-youtube-leccion"
+    temporal_ajeno = youtube / ".curso-react-04-importar-y-exportar.generando.mp4"
+    temporal_ajeno.write_bytes(b"lo escribe otro trabajo")
+
+    with _trabajo_lento(catalogo, monkeypatch, "alinear-voz"):
+        short = catalogo["cliente"].post(
+            f"{RUTA_ACCIONES}/render-short",
+            headers=CABECERAS,
+            json={"short": "short-falso-1"},
+        )
+        final = catalogo["cliente"].post(
+            f"{RUTA_ACCIONES}/video-final",
+            headers=CABECERAS,
+            json={"previa": "previa-v3.mp4"},
+        )
+
+    assert short.status_code == 409
+    assert short.json()["detail"] == "Ya hay un trabajo en marcha"
+    assert final.status_code == 409
+    assert not (carpeta / "shorts").exists()
+    assert temporal_ajeno.read_bytes() == b"lo escribe otro trabajo"

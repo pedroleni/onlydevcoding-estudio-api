@@ -502,10 +502,12 @@ def _archivos_directos(
     directorio: Path,
     predicado: Callable[[str], bool],
 ) -> list[Path]:
+    # Los nombres que empiezan por «.» (como los temporales ``.….generando.mp4``)
+    # no son vídeos, previas, shorts ni piezas.
     return [
         ruta
         for ruta in _entradas_seguras(raiz, directorio)
-        if ruta.is_file() and predicado(ruta.name)
+        if not ruta.name.startswith(".") and ruta.is_file() and predicado(ruta.name)
     ]
 
 
@@ -781,6 +783,7 @@ def leer_leccion(
             config,
             identificador_guion,
             carpeta_de_trabajo(leido, numero),
+            guiones[numero][2],
         )
     return Leccion(
         curso=curso,

@@ -155,7 +155,8 @@ def _hay_video_final(config: Config, carpeta: Path | None) -> bool:
                 )
             )
             for nombre in nombres
-            if nombre.lower().endswith(".mp4")
+            # Un temporal oculto (``.….generando.mp4``) no es el vídeo final.
+            if not nombre.startswith(".") and nombre.lower().endswith(".mp4")
         )
     except OSError:
         return False

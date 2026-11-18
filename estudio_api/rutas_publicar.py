@@ -2,7 +2,7 @@ import json
 import threading
 from contextlib import closing
 from pathlib import Path as RutaArchivo
-from typing import Annotated, cast
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Request
 from pydantic import BaseModel, ConfigDict
@@ -38,7 +38,7 @@ from estudio_api.publicacion import (
     textos_red_vacios,
     validar_textos,
 )
-from estudio_api.rutas_api import CursoId, NumeroLeccion
+from estudio_api.rutas_api import CursoId, NumeroLeccion, config_peticion
 from estudio_api.tareas import completar_tareas_de_red
 from estudio_api.vista_publicacion import VistaPublicacion, construir_vista_publicacion
 
@@ -52,10 +52,6 @@ class EleccionPortada(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ruta: str
-
-
-def _config(request: Request) -> Config:
-    return cast(Config, request.app.state.config)
 
 
 def _datos_guia(
@@ -114,7 +110,7 @@ def obtener_publicacion(
     curso: CursoId,
     numero: NumeroLeccion,
 ) -> VistaPublicacion | Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         vista = construir_vista_publicacion(config, curso, numero, bd)
     if vista is None:
@@ -133,7 +129,7 @@ def cambiar_portada(
     numero: NumeroLeccion,
     pieza: PiezaId,
 ) -> VistaPublicacion | Response:
-    config = _config(request)
+    config = config_peticion(request)
     with _BLOQUEO_CAMBIO_TEXTOS, closing(abrir_bd(config.bd_ruta)) as bd:
         vista = construir_vista_publicacion(config, curso, numero, bd)
         if vista is None:
@@ -192,7 +188,7 @@ def cambiar_estado(
     pieza: PiezaId,
     red: RedId,
 ) -> VistaPublicacion | Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         vista = construir_vista_publicacion(config, curso, numero, bd)
         if vista is None:
@@ -227,7 +223,7 @@ def cambiar_textos(
         mensaje_validacion = str(error)
         raise HTTPException(status_code=422, detail=mensaje_validacion) from error
 
-    config = _config(request)
+    config = config_peticion(request)
     carpeta = carpeta_leccion(config, curso, numero)
     if carpeta is None:
         return Response(status_code=404)

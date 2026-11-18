@@ -1596,3 +1596,180 @@ def test_ultimo_trabajo_filtra_por_objetivo(tmp_path):
     assert primero is not None and primero.objetivo == "short-a"
     assert segundo is not None and segundo.objetivo == "short-b"
     assert sin_objetivo is None
+
+
+# --- Ronda final: instalación sin enlaces simbólicos (M1 de la auditoría) ---
+
+_ESCRIBIR_TEMPORAL = (
+    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')"
+)
+_ENLAZAR_TEMPORAL = "import os,sys; os.symlink(sys.argv[2], sys.argv[1])"
+
+
+def _plan_instalacion(tmp_path, instalar, comando, temporal, destino):
+    return PlanTrabajo(
+        accion="instalacion",
+        objetivo=None,
+        comando=[sys.executable, "-c", *comando],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar=instalar,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+
+@pytest.mark.parametrize("instalar", ["reemplazar", "sin_pisar", "archivar"])
+def test_instalar_rechaza_un_temporal_que_es_un_enlace(tmp_path, instalar):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "fuera.txt"
+    fuera.write_bytes(b"archivo ajeno")
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    if instalar == "archivar":
+        destino.write_bytes(b"anterior")
+    plan = _plan_instalacion(
+        tmp_path,
+        instalar,
+        [_ENLAZAR_TEMPORAL, str(temporal), str(fuera)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert fuera.read_bytes() == b"archivo ajeno"
+    assert not os.path.lexists(temporal)
+    if instalar == "archivar":
+        assert destino.read_bytes() == b"anterior"
+        assert not (carpeta / "anteriores").exists()
+    else:
+        assert not os.path.lexists(destino)
+
+
+@pytest.mark.parametrize("instalar", ["reemplazar", "sin_pisar", "archivar"])
+def test_instalar_rechaza_un_destino_que_es_un_enlace(tmp_path, instalar):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "fuera.txt"
+    fuera.write_bytes(b"archivo ajeno")
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    destino.symlink_to(fuera)
+    plan = _plan_instalacion(
+        tmp_path,
+        instalar,
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert fuera.read_bytes() == b"archivo ajeno"
+    assert destino.is_symlink()
+    assert not temporal.exists()
+    assert not (carpeta / "anteriores").exists()
+
+
+def test_archivar_rechaza_anteriores_enlazado_fuera_sin_mover_nada(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    carpeta = tmp_path / "leccion"
+    carpeta.mkdir()
+    fuera = tmp_path / "carpeta-ajena"
+    fuera.mkdir()
+    (carpeta / "anteriores").symlink_to(fuera, target_is_directory=True)
+    temporal = carpeta / ".video.generando.mp4"
+    destino = carpeta / "video.mp4"
+    destino.write_bytes(b"anterior")
+    plan = _plan_instalacion(
+        tmp_path,
+        "archivar",
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"anterior"
+    assert list(fuera.iterdir()) == []
+    assert not temporal.exists()
+
+
+def test_sin_pisar_enlaza_sin_seguir_enlaces(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v1.generando.mp4"
+    destino = tmp_path / "previa-v1.mp4"
+    llamadas = []
+    enlazar_real = os.link
+
+    def enlazar_espiando(origen, final, **kwargs):
+        llamadas.append(kwargs)
+        return enlazar_real(origen, final, **kwargs)
+
+    monkeypatch.setattr(modulo_trabajos.os, "link", enlazar_espiando)
+    plan = _plan_instalacion(
+        tmp_path,
+        "sin_pisar",
+        [_ESCRIBIR_TEMPORAL, str(temporal)],
+        temporal,
+        destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert destino.read_bytes() == b"nuevo"
+    assert llamadas == [{"follow_symlinks": False}]
+
+
+def test_codigo_de_salida_con_fallo_al_borrar_temporal_conserva_su_mensaje(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    unlink_real = Path.unlink
+
+    def unlink_con_fallo(ruta, *args, **kwargs):
+        if ruta == temporal:
+            raise OSError("fallo de borrado ficticio")
+        return unlink_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_con_fallo)
+    plan = _plan_instalacion(
+        tmp_path,
+        "archivar",
+        [
+            (
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'x'); "
+                "raise SystemExit(3)"
+            ),
+            str(temporal),
+        ],
+        temporal,
+        tmp_path / "video.mp4",
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "La herramienta terminó con el código 3"

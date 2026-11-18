@@ -1,6 +1,9 @@
+import os
 import re
 import shutil
 import sqlite3
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -49,6 +52,17 @@ PATRON_ID_SHORT = re.compile(r"^[a-z0-9-]{1,60}$")
 PATRON_ID_ESCENA = re.compile(r"^E\d{2}$")
 PROGRESO_NINGUNO = re.compile(r"(?!)")
 
+SIN_GUION = "Esta lección aún no tiene guion"
+SIN_MONTAJE = "Esta lección aún no tiene montaje"
+SIN_MONTAJE_PARA_SHORTS = "Prepara antes el montaje de la lección"
+CARPETA_NO_PREPARABLE = "No se puede preparar la carpeta del resultado"
+CARPETA_PREVIA_NO_PREPARABLE = "No se puede preparar la carpeta de la vista previa"
+# Acciones que leen el guion o las tomas de la lección mientras corren: si se
+# cambian a la vez, el montaje sale viejo aunque el estado diga «al día».
+ACCIONES_QUE_LEEN_LA_LECCION = frozenset(
+    {"alinear-voz", "preparar-montaje", "preparar-shorts"}
+)
+
 ETIQUETAS: dict[IdAccion, str] = {
     "alinear-voz": "Alinear la voz",
     "preparar-montaje": "Preparar el montaje",
@@ -94,7 +108,6 @@ class _Contexto:
     slug: str
     guion: str | None
     datos_guion: dict[str, Any] | None
-    ruta_guion: Path | None
 
 
 @dataclass(frozen=True)
@@ -139,7 +152,6 @@ def _contexto(
             slug=slug,
             guion=ruta_guion.stem,
             datos_guion=guion,
-            ruta_guion=ruta_guion,
         )
     slug = carpetas[numero][0]
     return _Contexto(
@@ -150,7 +162,6 @@ def _contexto(
         slug=slug,
         guion=None,
         datos_guion=None,
-        ruta_guion=None,
     )
 
 
@@ -159,6 +170,81 @@ def _ruta_en_leccion(contexto: _Contexto, *partes: str) -> Path:
         contexto.config.cursos_dir.resolve()
     )
     return ruta_segura(contexto.config.cursos_dir, *relativa.parts, *partes)
+
+
+def _destino_en_leccion(contexto: _Contexto, *partes: str) -> Path:
+    """Destino dentro de la lección sin enlaces simbólicos en ningún componente.
+
+    Las carpetas de resultado (``previa/``, ``shorts/``, ``publicar/``…) y el
+    propio archivo tienen que ser rutas literales: un enlace, aunque apunte
+    dentro de ``CURSOS_DIR``, llevaría el resultado a otra lección.
+    """
+    literal = contexto.carpeta.resolve().joinpath(*partes)
+    if _ruta_en_leccion(contexto, *partes) != literal:
+        raise ValueError("La ruta del resultado contiene enlaces simbólicos")
+    actual = contexto.carpeta.resolve()
+    for parte in partes:
+        actual = actual / parte
+        if actual.is_symlink():
+            raise ValueError("La ruta del resultado contiene enlaces simbólicos")
+    return literal
+
+
+def _quitar_temporal(temporal: Path) -> None:
+    """Borra lo que haya en la ruta del temporal sin seguir enlaces."""
+    try:
+        os.unlink(temporal)
+    except FileNotFoundError:
+        pass
+
+
+def _crear_carpeta_real(ruta: Path) -> None:
+    """Crea ``ruta`` si falta; tiene que acabar siendo un directorio, no un enlace."""
+    try:
+        ruta.mkdir()
+    except FileExistsError:
+        pass
+    if not stat.S_ISDIR(os.lstat(ruta).st_mode):
+        raise NotADirectoryError("La carpeta del resultado no es un directorio real")
+
+
+def _preparar_en_leccion(
+    contexto: _Contexto,
+    carpetas: tuple[str, ...],
+    temporal: Path,
+) -> Callable[[], None]:
+    """Crea, nivel a nivel, las carpetas literales del resultado en la lección."""
+
+    def preparar() -> None:
+        try:
+            actual = contexto.carpeta.resolve()
+            _crear_carpeta_real(actual)
+            for parte in carpetas:
+                actual = actual / parte
+                _crear_carpeta_real(actual)
+            _quitar_temporal(temporal)
+        except (OSError, ValueError) as error:
+            raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
+
+    return preparar
+
+
+def _preparar_previa(
+    config: Config,
+    temporal: Path,
+    destino: Path,
+) -> Callable[[], None]:
+    def preparar() -> None:
+        raiz = config.estudio_dir.resolve()
+        try:
+            destino.parent.resolve().relative_to(raiz)
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            destino.parent.resolve().relative_to(raiz)
+            _quitar_temporal(temporal)
+        except (OSError, ValueError) as error:
+            raise AccionNoDisponible(503, CARPETA_PREVIA_NO_PREPARABLE) from error
+
+    return preparar
 
 
 def _ruta_toma_escena(
@@ -218,33 +304,61 @@ def _alineaciones_con_toma(
     return resultado
 
 
-def estado_montaje(config: Config, guion: str, carpeta: Path) -> EstadoMontaje:
+def _fecha_montaje_valido(
+    config: Config,
+    guion: str,
+    datos_guion: dict[str, Any] | None,
+) -> int | None:
+    """``st_mtime_ns`` del montaje si es válido para el guion; si no, ``None``.
+
+    Es el único criterio de «hay montaje» para el estado, la previa, el render
+    y los shorts: el del teleprompter, que valida la estructura contra el guion.
+    """
+    if datos_guion is None:
+        return None
     montaje = ruta_montaje(config, guion)
     if montaje is None:
-        return EstadoMontaje(estado="sin_montaje")
+        return None
     try:
-        if not montaje.is_file():
-            return EstadoMontaje(estado="sin_montaje")
-        if _leer_json(montaje) is None:
-            return EstadoMontaje(estado="sin_montaje")
-        fecha_montaje = montaje.stat().st_mtime_ns
+        fecha = montaje.stat().st_mtime_ns
     except OSError:
-        return EstadoMontaje(estado="sin_montaje")
+        return None
+    if _leer_montaje(montaje, datos_guion) is None:
+        return None
+    return fecha
 
-    try:
-        ruta_guion = ruta_segura(config.estudio_dir, "lecciones", f"{guion}.json")
-    except ValueError:
-        return EstadoMontaje(estado="sin_montaje")
-    datos_guion = _leer_json(ruta_guion)
-    alineaciones = _alineaciones_con_toma(
+
+def _hay_montaje(contexto: _Contexto) -> bool:
+    return (
+        contexto.guion is not None
+        and _fecha_montaje_valido(
+            contexto.config,
+            contexto.guion,
+            contexto.datos_guion,
+        )
+        is not None
+    )
+
+
+def estado_montaje(
+    config: Config,
+    guion: str,
+    carpeta: Path,
+    datos_guion: dict[str, Any] | None,
+) -> EstadoMontaje:
+    """Estado del montaje con el guion ya leído (``datos_guion``).
+
+    ``sin_alinear`` se calcula siempre, también sin montaje; el ``estado``
+    sigue el orden del plan.
+    """
+    sin_alinear: list[str] = []
+    fechas_alineaciones: list[int] = []
+    for identificador, toma, alineacion in _alineaciones_con_toma(
         config,
         guion,
         carpeta,
         datos_guion,
-    )
-    sin_alinear: list[str] = []
-    fechas_alineaciones: list[int] = []
-    for identificador, toma, alineacion in alineaciones:
+    ):
         try:
             fecha_toma = toma.stat().st_mtime_ns
             fecha_alineacion = alineacion.stat().st_mtime_ns
@@ -254,15 +368,17 @@ def estado_montaje(config: Config, guion: str, carpeta: Path) -> EstadoMontaje:
         if fecha_alineacion < fecha_toma:
             sin_alinear.append(identificador)
         fechas_alineaciones.append(fecha_alineacion)
+
+    fecha_montaje = _fecha_montaje_valido(config, guion, datos_guion)
+    if fecha_montaje is None:
+        return EstadoMontaje(estado="sin_montaje", sin_alinear=sin_alinear)
     if sin_alinear:
-        return EstadoMontaje(
-            estado="voz_sin_alinear",
-            sin_alinear=sin_alinear,
-        )
+        return EstadoMontaje(estado="voz_sin_alinear", sin_alinear=sin_alinear)
 
     try:
+        ruta_guion = ruta_segura(config.estudio_dir, "lecciones", f"{guion}.json")
         guion_cambiado = ruta_guion.stat().st_mtime_ns > fecha_montaje
-    except OSError:
+    except OSError, ValueError:
         guion_cambiado = False
     if guion_cambiado or any(
         fecha_alineacion > fecha_montaje for fecha_alineacion in fechas_alineaciones
@@ -307,29 +423,18 @@ def _ids_shorts(contexto: _Contexto) -> list[str]:
     return ids
 
 
-def _exigir_guion(
-    contexto: _Contexto,
-    *,
-    para_plan: bool,
-) -> _Evaluacion | None:
+def _exigir_guion(contexto: _Contexto) -> _Evaluacion | None:
     if contexto.guion is None or contexto.datos_guion is None:
-        return _no_disponible(
-            (
-                "La lección no existe"
-                if para_plan
-                else "Esta lección aún no tiene guion"
-            ),
-            estado_http=404,
-        )
+        return _no_disponible(SIN_GUION)
     return None
 
 
 def _evaluar_alinear_voz(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    para_plan: bool,
+    _para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
+    sin_guion = _exigir_guion(contexto)
     if sin_guion is not None:
         return sin_guion
     tomas = _alineaciones_con_toma(
@@ -346,40 +451,40 @@ def _evaluar_alinear_voz(
 def _evaluar_preparar_montaje(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    para_plan: bool,
+    _para_plan: bool,
 ) -> _Evaluacion:
-    return _exigir_guion(contexto, para_plan=para_plan) or _Evaluacion(True)
+    return _exigir_guion(contexto) or _Evaluacion(True)
 
 
 def _evaluar_previa_grabacion(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    para_plan: bool,
+    _para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
+    sin_guion = _exigir_guion(contexto)
     if sin_guion is not None:
         return sin_guion
-    montaje = ruta_montaje(contexto.config, contexto.guion)
-    if (
-        montaje is None
-        or not montaje.is_file()
-        or _leer_montaje(montaje, contexto.datos_guion) is None
-    ):
-        return _no_disponible("Esta lección aún no tiene montaje")
+    if not _hay_montaje(contexto):
+        return _no_disponible(SIN_MONTAJE)
     return _Evaluacion(True)
 
 
 def _evaluar_render_leccion(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    para_plan: bool,
+    _para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
+    sin_guion = _exigir_guion(contexto)
     if sin_guion is not None:
         return sin_guion
-    estado = estado_montaje(contexto.config, contexto.guion, contexto.carpeta).estado
+    estado = estado_montaje(
+        contexto.config,
+        contexto.guion,
+        contexto.carpeta,
+        contexto.datos_guion,
+    ).estado
     mensajes = {
-        "sin_montaje": "Esta lección aún no tiene montaje",
+        "sin_montaje": SIN_MONTAJE,
         "voz_sin_alinear": "Hay voz sin alinear: alinea la voz y prepara el montaje",
         "guion_cambiado": "Guion cambiado: hay que regenerar el montaje",
     }
@@ -415,6 +520,9 @@ def _evaluar_preparar_shorts(
 ) -> _Evaluacion:
     if not _ids_shorts(contexto):
         return _no_disponible("Esta lección no tiene shorts")
+    if not _hay_montaje(contexto):
+        # preparar-shorts.mjs lee el montaje de la lección.
+        return _no_disponible(SIN_MONTAJE_PARA_SHORTS)
     return _Evaluacion(True)
 
 
@@ -538,6 +646,7 @@ def _plan_previa_grabacion(contexto: _Contexto) -> PlanTrabajo:
         destino=destino,
         instalar="reemplazar",
         mensajes=MENSAJES_PREVIA,
+        preparar=_preparar_previa(contexto.config, temporal, destino),
     )
 
 
@@ -548,7 +657,7 @@ def _plan_render_leccion(contexto: _Contexto) -> PlanTrabajo:
         if (coincidencia := PATRON_PREVIA.fullmatch(nombre)) is not None
     ]
     numero_version = max(versiones, default=0) + 1
-    destino = _ruta_en_leccion(
+    destino = _destino_en_leccion(
         contexto,
         "previa",
         f"previa-v{numero_version}.mp4",
@@ -574,6 +683,7 @@ def _plan_render_leccion(contexto: _Contexto) -> PlanTrabajo:
         patron_progreso=PROGRESO_REMOTION,
         tiempo_maximo=4 * 60 * 60,
         mensajes=MENSAJES_REMOTION,
+        preparar=_preparar_en_leccion(contexto, ("previa",), temporal),
     )
 
 
@@ -582,7 +692,7 @@ def _plan_video_final(
     opciones: OpcionesAccion,
 ) -> PlanTrabajo:
     previa = _ruta_en_leccion(contexto, "previa", opciones.previa)
-    destino = _ruta_en_leccion(
+    destino = _destino_en_leccion(
         contexto,
         "publicar",
         "1-youtube-leccion",
@@ -593,7 +703,9 @@ def _plan_video_final(
         accion="video-final",
         objetivo=None,
         comando=[
+            # -f: sin ~/.zshenv ni más configuración del usuario.
             "/bin/zsh",
+            "-f",
             "herramientas/publicar/sonido-redes.sh",
             str(previa),
             str(temporal),
@@ -605,6 +717,11 @@ def _plan_video_final(
         patron_progreso=PROGRESO_NINGUNO,
         tiempo_maximo=30 * 60,
         mensajes=MENSAJES_HERRAMIENTA,
+        preparar=_preparar_en_leccion(
+            contexto,
+            ("publicar", "1-youtube-leccion"),
+            temporal,
+        ),
     )
 
 
@@ -628,7 +745,7 @@ def _plan_render_short(
     contexto: _Contexto,
     opciones: OpcionesAccion,
 ) -> PlanTrabajo:
-    destino = _ruta_en_leccion(contexto, "shorts", f"{opciones.short}.mp4")
+    destino = _destino_en_leccion(contexto, "shorts", f"{opciones.short}.mp4")
     temporal = _temporal_oculto(destino)
     return PlanTrabajo(
         accion="render-short",
@@ -650,6 +767,7 @@ def _plan_render_short(
         patron_progreso=PROGRESO_REMOTION,
         tiempo_maximo=60 * 60,
         mensajes=MENSAJES_REMOTION,
+        preparar=_preparar_en_leccion(contexto, ("shorts",), temporal),
     )
 
 
@@ -684,10 +802,7 @@ def plan_accion(
             return _plan_preparar_shorts(contexto)
         return _plan_render_short(contexto, opciones)
     except ValueError as error:
-        raise AccionNoDisponible(
-            503,
-            "No se puede preparar la carpeta del resultado",
-        ) from error
+        raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
 
 
 def estados_acciones(

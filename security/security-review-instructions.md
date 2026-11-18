@@ -110,6 +110,72 @@ Amplían las decisiones anteriores; lo que no se cite aquí sigue igual.
   La salida de Remotion (`registro`) se guarda en la base, pero la API no la
   devuelve.
 
+## Precedentes de la fase 5 (acciones del estudio)
+
+Amplían las decisiones anteriores; lo que no se cite aquí sigue igual.
+
+- **Catálogo cerrado.** Las únicas acciones son `alinear-voz`,
+  `preparar-montaje`, `previa-grabacion`, `render-leccion`, `video-final`,
+  `preparar-shorts` y `render-short`. Cada una tiene un comando fijo, con
+  `shell=False` y `cwd` en `ESTUDIO_DIR`:
+  - `node herramientas/{alinear-voz,preparar-leccion}.mjs <guion>`;
+  - `node herramientas/preparar-shorts.mjs l<N>`;
+  - `npx --no remotion render src/index.ts {Leccion|Short} <temporal>
+    --props=...` (la previa de grabación conserva el comando de la fase 4);
+  - `/bin/zsh -f herramientas/publicar/sonido-redes.sh <previa> <temporal>`;
+    `-f` evita que zsh lea `~/.zshenv` u otra configuración del usuario.
+
+  `node` y `npx` salen de `shutil.which`. Del cliente solo llegan el id de la
+  acción (`Literal`), `previa` (tiene que ser una versión existente de
+  `previa/`) y `short` (`^[a-z0-9-]{1,60}$` y presente en el `shorts.json` del
+  guion). Cualquier otro valor da 422 sin lanzar nada.
+- **Entorno de las herramientas.** El mínimo de la fase 4 más `CURSOS_DIR`,
+  tomado de la configuración, en las acciones que leen o escriben la lección.
+  Nunca `ESTUDIO_TOKEN`. Las herramientas viven en `ESTUDIO_DIR`, son del autor
+  y su alcance de escritura (alineaciones, `montaje.json`, `public/shorts/…`)
+  queda fuera de la API: la API solo garantiza el temporal y la instalación del
+  resultado final.
+- **Escrituras en `CURSOS_DIR` de la fase 5.** Los destinos son:
+  - `previa/previa-vN.mp4`, que no pisa nada (`os.link(...,
+    follow_symlinks=False)`);
+  - `shorts/<id>.mp4` y
+    `publicar/1-youtube-leccion/curso-<curso>-NN-<slug>.mp4`, que archivan el
+    anterior en `anteriores/<nombre>-<marca>.mp4`.
+
+  `previa/`, `shorts/`, `publicar/` y `publicar/1-youtube-leccion/`, y el
+  propio destino, son rutas literales: un enlace simbólico en cualquier
+  componente, aunque apunte dentro de `CURSOS_DIR`, da 503 «No se puede
+  preparar la carpeta del resultado». Las carpetas que faltan se crean nivel a
+  nivel y tienen que acabar siendo directorios reales.
+- **Temporal y `anteriores/`.** El temporal es `.<nombre>.generando.mp4` en la
+  carpeta del destino. Antes de lanzar, lo que haya en esa ruta (archivo o
+  enlace) se borra con `unlink`, que no sigue enlaces; no se crea con
+  `O_EXCL` para no depender de que Remotion acepte un archivo ya existente. Al
+  instalar, el temporal tiene que ser un archivo regular (`lstat`), el destino
+  no puede ser un enlace ni algo distinto de un archivo y `anteriores/` tiene
+  que ser un directorio real (se crea si falta). Cualquier violación deja el
+  trabajo en `error` con el mensaje de guardado, sin mover ni pisar nada. El
+  temporal se borra si el trabajo falla, se cancela, vence el tiempo o se
+  apaga la API.
+- **Motor de trabajos.** Un trabajo a la vez para toda la API. La carpeta del
+  resultado se prepara y el temporal se borra dentro de `lanzar`, con el
+  trabajo ya reservado: un 409 «Ya hay un trabajo en marcha» no crea carpetas
+  ni borra el temporal de otro trabajo. Tiempo máximo por acción: alinear 1 h,
+  preparar el montaje y los shorts 30 min, previa 2 h, render de la lección
+  4 h, vídeo final 30 min, short 1 h. Cancelar solo afecta a trabajos lanzados
+  por este proceso: SIGTERM al grupo, 10 s y SIGKILL, sin borrar el temporal
+  hasta que el grupo muere (aceptado: la reutilización del pid del líder en
+  ese intervalo no es explotable). `GET /api/trabajos` acepta `limite` de 1 a
+  100.
+- **Lección ocupada.** Mientras corre `alinear-voz`, `preparar-montaje` o
+  `preparar-shorts` de una lección, `PUT .../guion/textos` y `PUT
+  .../grabaciones/E<NN>` de esa lección responden 409 sin escribir; la subida
+  lo comprueba antes de leer el cuerpo.
+- **Tests y `datos/`.** Ningún test puede abrir la base real. Una fixture
+  `autouse` sustituye `sqlite3.connect` por un envoltorio que falla antes de
+  abrir cualquier ruta bajo `datos/`, y una guarda de sesión comprueba además
+  que `datos/` no cambia.
+
 ## Hallazgos prioritarios
 
 - Cualquier ruta derivada de una petición que pueda escapar de las raíces tras

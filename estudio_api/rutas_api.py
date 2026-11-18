@@ -25,22 +25,24 @@ from estudio_api.tareas import (
 router = APIRouter(prefix="/api")
 CursoId = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,40}$")]
 NumeroLeccion = Annotated[int, Path(ge=1, le=999)]
+TrabajoId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
-def _config(request: Request) -> Config:
+def config_peticion(request: Request) -> Config:
+    """Configuración de la app que atiende la petición (común a los routers)."""
     return cast(Config, request.app.state.config)
 
 
 @router.get("/cursos", response_model=list[Curso])
 def listar_cursos(request: Request) -> list[Curso]:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         return leer_cursos(config, bd)
 
 
 @router.post("/cursos", response_model=Curso, status_code=status.HTTP_201_CREATED)
 def dar_de_alta_curso(request: Request, curso: CursoApp) -> Curso:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         if curso_existe(config, bd, curso.id):
             raise HTTPException(status_code=409, detail="El curso ya existe")
@@ -60,7 +62,7 @@ def dar_de_alta_curso(request: Request, curso: CursoApp) -> Curso:
 
 @router.delete("/cursos/{curso}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_curso(request: Request, curso: CursoId) -> Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         resultado = borrar_curso_app(bd, curso)
     if resultado == "no_existe":
@@ -75,7 +77,7 @@ def listar_lecciones(
     request: Request,
     curso: CursoId,
 ) -> list[LeccionResumen] | Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         if not curso_existe(config, bd, curso):
             return Response(status_code=404)
@@ -89,7 +91,7 @@ def detalle_leccion(
     curso: CursoId,
     numero: NumeroLeccion,
 ) -> Leccion | Response:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         leccion = leer_leccion(config, curso, numero, bd)
     if leccion is None:
@@ -103,7 +105,7 @@ def obtener_medio(
     ruta: str = Query(default=""),
 ) -> Response:
     return servir_medio(
-        _config(request),
+        config_peticion(request),
         ruta,
         request.headers.get("range"),
     )

@@ -1,7 +1,6 @@
 from contextlib import closing
-from typing import Annotated, cast
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from estudio_api.acciones import (
@@ -14,47 +13,22 @@ from estudio_api.acciones import (
 )
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
-from estudio_api.rutas_api import CursoId, NumeroLeccion
+from estudio_api.rutas_api import CursoId, NumeroLeccion, TrabajoId, config_peticion
 from estudio_api.trabajos import (
     PlanTrabajo,
     Trabajo,
     TrabajoEnMarcha,
     cancelar,
     lanzar,
+    leer_trabajo,
     listar_trabajos,
 )
 
 router = APIRouter(prefix="/api")
-TrabajoId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
 class PeticionCancelar(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-def _config(request: Request) -> Config:
-    return cast(Config, request.app.state.config)
-
-
-def preparar_carpeta_resultado(config: Config, plan: PlanTrabajo) -> None:
-    if plan.destino is None:
-        return
-    raiz = (
-        config.estudio_dir.resolve()
-        if plan.accion == "previa-grabacion"
-        else config.cursos_dir.resolve()
-    )
-    try:
-        plan.destino.parent.resolve().relative_to(raiz)
-        plan.destino.parent.mkdir(parents=True, exist_ok=True)
-        plan.destino.parent.resolve().relative_to(raiz)
-    except (OSError, ValueError) as error:
-        mensaje = (
-            "No se puede preparar la carpeta de la vista previa"
-            if plan.accion == "previa-grabacion"
-            else "No se puede preparar la carpeta del resultado"
-        )
-        raise HTTPException(status_code=503, detail=mensaje) from error
 
 
 def lanzar_plan(
@@ -63,13 +37,18 @@ def lanzar_plan(
     numero: int,
     plan: PlanTrabajo,
 ) -> Trabajo:
-    preparar_carpeta_resultado(config, plan)
+    """Lanza el plan; la carpeta del resultado se prepara ya con el trabajo reservado."""
     try:
         return lanzar(config.bd_ruta, curso, numero, plan)
     except TrabajoEnMarcha as error:
         raise HTTPException(
             status_code=409,
             detail="Ya hay un trabajo en marcha",
+        ) from error
+    except AccionNoDisponible as error:
+        raise HTTPException(
+            status_code=error.estado_http,
+            detail=error.mensaje,
         ) from error
 
 
@@ -82,7 +61,7 @@ def obtener_acciones(
     curso: CursoId,
     numero: NumeroLeccion,
 ) -> list[EstadoAccion]:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         acciones = estados_acciones(config, bd, curso, numero)
     if acciones is None:
@@ -102,7 +81,7 @@ def ejecutar_accion(
     numero: NumeroLeccion,
     accion: IdAccion,
 ) -> Trabajo:
-    config = _config(request)
+    config = config_peticion(request)
     try:
         plan = plan_accion(config, curso, numero, accion, opciones)
     except AccionNoDisponible as error:
@@ -118,7 +97,7 @@ def obtener_trabajos(
     request: Request,
     limite: int = Query(default=20, ge=1, le=100),
 ) -> list[Trabajo]:
-    config = _config(request)
+    config = config_peticion(request)
     with closing(abrir_bd(config.bd_ruta)) as bd:
         return listar_trabajos(bd, limite)
 
@@ -129,10 +108,15 @@ def cancelar_trabajo(
     _peticion: PeticionCancelar,
     id: TrabajoId,
 ) -> Trabajo:
-    trabajo = cancelar(_config(request).bd_ruta, id)
-    if trabajo is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Ese trabajo no está en marcha",
-        )
-    return trabajo
+    config = config_peticion(request)
+    trabajo = cancelar(config.bd_ruta, id)
+    if trabajo is not None:
+        return trabajo
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        existe = leer_trabajo(bd, id) is not None
+    if not existe:
+        raise HTTPException(status_code=404, detail="El trabajo no existe")
+    raise HTTPException(
+        status_code=409,
+        detail="Ese trabajo no está en marcha",
+    )
