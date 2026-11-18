@@ -86,11 +86,6 @@ async def subir_entrega(
             detail="Ya hay una toma con ese nombre",
         ) from error
     except EntregaInvalida as error:
-        if longitud > 4_294_967_296:
-            raise HTTPException(
-                status_code=413,
-                detail="La toma supera el límite de 4 GiB",
-            ) from error
         raise HTTPException(
             status_code=422,
             detail="El archivo no es un vídeo MOV o MP4",

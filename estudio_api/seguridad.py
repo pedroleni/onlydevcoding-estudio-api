@@ -6,6 +6,8 @@ from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
 from starlette.types import Receive, Scope, Send
 
+from estudio_api.entregas import TAMANO_MAXIMO_ENTREGA
+
 AplicacionASGI = Callable[
     [Scope, Receive, Send],
     Awaitable[None],
@@ -15,7 +17,7 @@ HOSTS_PERMITIDOS = {"127.0.0.1:8000", "localhost:8000"}
 METODOS_LECTURA = {"GET", "HEAD", "OPTIONS"}
 TAMANO_MAXIMO_CUERPO = 256 * 1024
 MAXIMO_DIGITOS_CONTENT_LENGTH = 7
-LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int, int]] = [
+LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int, int, str]] = [
     (
         "PUT",
         re.compile(
@@ -24,6 +26,7 @@ LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int, int]] = [
         ),
         209_715_200,
         9,
+        "Cuerpo demasiado grande",
     ),
     (
         "PUT",
@@ -31,8 +34,9 @@ LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int, int]] = [
             r"^/api/cursos/[a-z0-9-]{1,40}/lecciones/"
             r"[1-9][0-9]{0,2}/entregas/[^/]+$"
         ),
-        4_294_967_296,
+        TAMANO_MAXIMO_ENTREGA,
         10,
+        "La toma supera el límite de 4 GiB",
     ),
 ]
 
@@ -133,10 +137,18 @@ class SeguridadLocalMiddleware:
             ruta = scope.get("path", "")
             limite_cuerpo = TAMANO_MAXIMO_CUERPO
             maximo_digitos = MAXIMO_DIGITOS_CONTENT_LENGTH
-            for metodo_limite, patron, limite, digitos in LIMITES_POR_RUTA:
+            mensaje_cuerpo_grande = "Cuerpo demasiado grande"
+            for (
+                metodo_limite,
+                patron,
+                limite,
+                digitos,
+                mensaje_413,
+            ) in LIMITES_POR_RUTA:
                 if metodo == metodo_limite and patron.fullmatch(ruta):
                     limite_cuerpo = limite
                     maximo_digitos = digitos
+                    mensaje_cuerpo_grande = mensaje_413
                     break
 
             if _valores_cabecera(scope, b"transfer-encoding"):
@@ -169,7 +181,7 @@ class SeguridadLocalMiddleware:
                     scope,
                     receive,
                     send,
-                    mensaje="Cuerpo demasiado grande",
+                    mensaje=mensaje_cuerpo_grande,
                     estado=413,
                 )
                 return
@@ -180,7 +192,7 @@ class SeguridadLocalMiddleware:
                     scope,
                     receive,
                     send,
-                    mensaje="Cuerpo demasiado grande",
+                    mensaje=mensaje_cuerpo_grande,
                     estado=413,
                 )
                 return
@@ -206,7 +218,7 @@ class SeguridadLocalMiddleware:
                     scope,
                     receive,
                     send,
-                    mensaje="Cuerpo demasiado grande",
+                    mensaje=mensaje_cuerpo_grande,
                     estado=413,
                 )
             return

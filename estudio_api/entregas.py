@@ -19,6 +19,7 @@ PATRON_ARCHIVO_ENTREGA = re.compile(
 TAMANO_MAXIMO_ENTREGA = 4_294_967_296
 
 _BLOQUEO_INSTALACION = threading.Lock()
+_SUBIDAS_EN_CURSO: set[tuple[Path, str]] = set()
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
@@ -89,12 +90,31 @@ def _crear_directorio_real(ruta: Path) -> bool:
     return creado
 
 
-def _borrar_directorios_vacios(directorios: tuple[Path, ...]) -> None:
+def _borrar_directorios_vacios_sin_bloqueo(
+    directorios: tuple[Path, ...],
+) -> None:
     for directorio in reversed(directorios):
+        if any(carpeta == directorio for carpeta, _ in _SUBIDAS_EN_CURSO):
+            continue
         try:
             directorio.rmdir()
         except OSError:
             pass
+
+
+def _borrar_directorios_vacios(directorios: tuple[Path, ...]) -> None:
+    with _BLOQUEO_INSTALACION:
+        _borrar_directorios_vacios_sin_bloqueo(directorios)
+
+
+def _finalizar_subida(
+    clave: tuple[Path, str] | None,
+    directorios: tuple[Path, ...],
+) -> None:
+    with _BLOQUEO_INSTALACION:
+        if clave is not None:
+            _SUBIDAS_EN_CURSO.discard(clave)
+        _borrar_directorios_vacios_sin_bloqueo(directorios)
 
 
 def _carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
@@ -110,7 +130,10 @@ def _carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
 
 
 def carpeta_entregas(config: Config, curso: str, numero: int) -> Path | None:
-    """Ruta literal de entregas, sin crearla y solo para una lección válida."""
+    """Devuelve la ruta literal o ``None`` si la lección no existe.
+
+    Puede lanzar ``OSError`` si algún componente es un enlace simbólico.
+    """
     carpeta = _carpeta_leccion(config, curso, numero)
     if carpeta is None:
         return None
@@ -167,6 +190,7 @@ def _abrir_temporal(
     archivo: str,
 ) -> _TemporalEntrega:
     nombre_temporal = f".{archivo}.subiendo"
+    clave = (directorios.entregas, archivo)
     with _BLOQUEO_INSTALACION:
         if _existe_nombre_en_videos(directorios.grabaciones, archivo):
             raise EntregaExistente
@@ -196,10 +220,29 @@ def _abrir_temporal(
                     follow_symlinks=False,
                 )
                 if stat.S_ISREG(datos.st_mode):
-                    raise EntregaExistente from error
-                raise OSError(
-                    "El temporal de entrega no es un archivo regular"
-                ) from error
+                    if clave in _SUBIDAS_EN_CURSO:
+                        raise EntregaExistente from error
+                    try:
+                        os.unlink(
+                            nombre_temporal,
+                            dir_fd=descriptor_directorio,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        descriptor = os.open(
+                            nombre_temporal,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+                            0o600,
+                            dir_fd=descriptor_directorio,
+                        )
+                    except FileExistsError as segundo_error:
+                        raise EntregaExistente from segundo_error
+                else:
+                    raise OSError(
+                        "El temporal de entrega no es un archivo regular"
+                    ) from error
+            _SUBIDAS_EN_CURSO.add(clave)
         except BaseException:
             os.close(descriptor_directorio)
             raise
@@ -294,12 +337,14 @@ async def _recibir_entrega(
                 raise EntregaInvalida
             if len(cabecera) < 8:
                 cabecera.extend(trozo[: 8 - len(cabecera)])
+                if len(cabecera) == 8 and cabecera[4:8] != b"ftyp":
+                    raise EntregaInvalida
             await run_in_threadpool(_escribir_trozo, temporal.descriptor, trozo)
         try:
             await run_in_threadpool(_sincronizar_y_cerrar, temporal.descriptor)
         finally:
             descriptor_abierto = False
-        if total != longitud or len(cabecera) < 8 or cabecera[4:8] != b"ftyp":
+        if total != longitud or len(cabecera) < 8:
             raise EntregaInvalida
         return total
     except BaseException:
@@ -330,8 +375,11 @@ async def guardar_entrega(
         numero,
     )
     temporal: _TemporalEntrega | None = None
+    clave_subida: tuple[Path, str] | None = None
+    limpiar_directorios = True
     try:
         temporal = await run_in_threadpool(_abrir_temporal, directorios, archivo)
+        clave_subida = (directorios.entregas, archivo)
         total = await _recibir_entrega(temporal, trozos, longitud)
         await run_in_threadpool(
             _instalar_temporal,
@@ -340,6 +388,7 @@ async def guardar_entrega(
             archivo,
         )
         temporal = None
+        limpiar_directorios = False
         return ArchivoEntregado(archivo=archivo, bytes=total)
     except BaseException:
         if temporal is not None:
@@ -349,8 +398,13 @@ async def guardar_entrega(
                 await run_in_threadpool(_limpiar_temporal_completo, temporal)
             except OSError:
                 pass
-        await run_in_threadpool(_borrar_directorios_vacios, directorios.creados)
         raise
+    finally:
+        await run_in_threadpool(
+            _finalizar_subida,
+            clave_subida,
+            directorios.creados if limpiar_directorios else (),
+        )
 
 
 def listar_entregas(
@@ -387,42 +441,44 @@ def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> boo
     if carpeta is None or not carpeta.exists():
         return False
     _exigir_directorio_real(carpeta)
-    analisis = _ruta_literal_segura(carpeta, ".analisis")
-    datos_analisis = _lstat_o_none(analisis)
-    descriptor_analisis: int | None = None
-    if datos_analisis is not None:
-        if not stat.S_ISDIR(datos_analisis.st_mode):
-            raise OSError("La carpeta de análisis no es un directorio real")
-        descriptor_analisis = os.open(
-            analisis,
-            os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
-        )
-
+    descriptor = os.open(carpeta, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
-        descriptor = os.open(carpeta, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
-        try:
-            try:
-                datos = os.stat(archivo, dir_fd=descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                return False
-            if not stat.S_ISREG(datos.st_mode):
-                return False
-            os.unlink(archivo, dir_fd=descriptor)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        nombre_real: str | None = None
+        with os.scandir(descriptor) as entradas:
+            for entrada in entradas:
+                if entrada.name != archivo:
+                    continue
+                datos = entrada.stat(follow_symlinks=False)
+                if stat.S_ISREG(datos.st_mode):
+                    nombre_real = entrada.name
+                break
+        if nombre_real is None:
+            return False
 
-        if descriptor_analisis is not None:
-            prefijo = f"{archivo}."
-            with os.scandir(descriptor_analisis) as entradas:
-                for entrada in entradas:
-                    if not entrada.name.startswith(prefijo):
-                        continue
-                    datos = entrada.stat(follow_symlinks=False)
-                    if stat.S_ISREG(datos.st_mode):
-                        os.unlink(entrada.name, dir_fd=descriptor_analisis)
-            os.fsync(descriptor_analisis)
+        analisis = _ruta_literal_segura(carpeta, ".analisis")
+        datos_analisis = _lstat_o_none(analisis)
+        if datos_analisis is not None:
+            if not stat.S_ISDIR(datos_analisis.st_mode):
+                raise OSError("La carpeta de análisis no es un directorio real")
+            descriptor_analisis = os.open(
+                analisis,
+                os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
+            )
+            try:
+                prefijo = f"{nombre_real}."
+                with os.scandir(descriptor_analisis) as entradas:
+                    for entrada in entradas:
+                        if not entrada.name.startswith(prefijo):
+                            continue
+                        datos = entrada.stat(follow_symlinks=False)
+                        if stat.S_ISREG(datos.st_mode):
+                            os.unlink(entrada.name, dir_fd=descriptor_analisis)
+                os.fsync(descriptor_analisis)
+            finally:
+                os.close(descriptor_analisis)
+
+        os.unlink(nombre_real, dir_fd=descriptor)
+        os.fsync(descriptor)
         return True
     finally:
-        if descriptor_analisis is not None:
-            os.close(descriptor_analisis)
+        os.close(descriptor)

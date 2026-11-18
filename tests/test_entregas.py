@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import shutil
 from types import SimpleNamespace
@@ -9,8 +10,9 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from estudio_api import entregas as modulo_entregas
 from estudio_api.app import crear_app
-from estudio_api.entregas import guardar_entrega
+from estudio_api.entregas import carpeta_entregas, guardar_entrega
 from estudio_api.rutas_entregas import subir_entrega
 from tests.ayudas import TOKEN
 
@@ -118,7 +120,7 @@ def test_content_length_de_once_digitos_se_rechaza_en_el_middleware(entregas):
     )
 
     assert respuesta.status_code == 413
-    assert respuesta.text == "Cuerpo demasiado grande"
+    assert respuesta.text == "La toma supera el límite de 4 GiB"
     assert not (leccion / "grabaciones" / "entregas").exists()
 
 
@@ -132,7 +134,67 @@ def test_content_length_de_diez_digitos_superior_a_4_gib_da_413(entregas):
     )
 
     assert respuesta.status_code == 413
+    assert respuesta.text == "La toma supera el límite de 4 GiB"
     assert not (leccion / "grabaciones" / "entregas").exists()
+
+
+def test_content_length_de_diez_digitos_depende_de_la_ruta(entregas):
+    _, cliente, _ = entregas
+
+    async def llamar(ruta: str, tipo: bytes) -> list[dict]:
+        mensajes: list[dict] = []
+        peticiones = iter(
+            [
+                {"type": "http.request", "body": b"", "more_body": True},
+                {"type": "http.disconnect"},
+            ]
+        )
+
+        async def recibir() -> dict:
+            return next(peticiones)
+
+        async def enviar(mensaje: dict) -> None:
+            mensajes.append(mensaje)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "PUT",
+            "scheme": "http",
+            "path": ruta,
+            "raw_path": ruta.encode(),
+            "query_string": b"",
+            "headers": [
+                (b"host", b"127.0.0.1:8000"),
+                (b"content-type", tipo),
+                (b"content-length", b"1000000000"),
+                (b"x-estudio-token", TOKEN.encode()),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8000),
+            "root_path": "",
+        }
+        await cliente.app(scope, recibir, enviar)
+        return mensajes
+
+    ruta_entrega = f"{RUTA_ENTREGAS}/IMG_1234.mov"
+    ruta_voz = "/api/cursos/react/lecciones/4/grabaciones/E03"
+    mensajes_entrega = asyncio.run(llamar(ruta_entrega, b"video/quicktime"))
+    mensajes_voz = asyncio.run(llamar(ruta_voz, b"audio/wav"))
+
+    estado_entrega = next(
+        mensaje["status"]
+        for mensaje in mensajes_entrega
+        if mensaje["type"] == "http.response.start"
+    )
+    estado_voz = next(
+        mensaje["status"]
+        for mensaje in mensajes_voz
+        if mensaje["type"] == "http.response.start"
+    )
+    assert estado_entrega == 400
+    assert estado_voz == 413
 
 
 def test_sin_ftyp_da_422_y_no_deja_temporal(entregas):
@@ -144,6 +206,34 @@ def test_sin_ftyp_da_422_y_no_deja_temporal(entregas):
     assert respuesta.json()["detail"] == "El archivo no es un vídeo MOV o MP4"
     carpeta = leccion / "grabaciones" / "entregas"
     assert not (carpeta / "IMG_1234.mov").exists()
+    assert not (carpeta / ".IMG_1234.mov.subiendo").exists()
+
+
+def test_ftyp_invalido_corta_la_lectura_en_cuanto_recibe_ocho_bytes(entregas):
+    config, _, leccion = entregas
+    trozos_leidos = 0
+
+    async def cuerpo_grande():
+        nonlocal trozos_leidos
+        trozos_leidos += 1
+        yield b"sin_tipo"
+        trozos_leidos += 1
+        yield b"x" * (5 * 1024 * 1024)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            guardar_entrega(
+                config,
+                "react",
+                4,
+                "IMG_1234.mov",
+                cuerpo_grande(),
+                5 * 1024 * 1024 + 8,
+            )
+        )
+
+    carpeta = leccion / "grabaciones" / "entregas"
+    assert trozos_leidos == 1
     assert not (carpeta / ".IMG_1234.mov.subiendo").exists()
 
 
@@ -160,6 +250,87 @@ def test_repetir_nombre_da_409_y_conserva_el_primero(entregas):
     assert repetida.json()["detail"] == "Ya hay una toma con ese nombre"
     assert destino.read_bytes() == primero
     assert not (destino.parent / ".IMG_1234.mov.subiendo").exists()
+
+
+def test_temporal_regular_huerfano_se_reemplaza_y_no_queda_al_final(entregas):
+    _, cliente, leccion = entregas
+    carpeta = leccion / "grabaciones" / "entregas"
+    carpeta.mkdir(parents=True)
+    temporal = carpeta / ".IMG_1234.mov.subiendo"
+    temporal.write_bytes(b"subida interrumpida")
+    cuerpo = _video(64)
+
+    respuesta = _subir(cliente, "IMG_1234.mov", cuerpo)
+
+    assert respuesta.status_code == 201
+    assert (carpeta / "IMG_1234.mov").read_bytes() == cuerpo
+    assert not temporal.exists()
+
+
+def test_una_segunda_subida_del_mismo_nombre_en_curso_da_conflicto(entregas):
+    config, _, _ = entregas
+    primera_pausada = asyncio.Event()
+    terminar_primera = asyncio.Event()
+    cuerpo = _video(64)
+    lecturas_primera = 0
+
+    def peticion(recibir):
+        ruta = f"{RUTA_ENTREGAS}/IMG_1234.mov"
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "PUT",
+            "scheme": "http",
+            "path": ruta,
+            "raw_path": ruta.encode(),
+            "query_string": b"",
+            "headers": [
+                (b"content-type", b"video/quicktime"),
+                (b"content-length", str(len(cuerpo)).encode()),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("127.0.0.1", 8000),
+            "app": SimpleNamespace(state=SimpleNamespace(config=config)),
+        }
+        return Request(scope, recibir)
+
+    async def recibir_primera():
+        nonlocal lecturas_primera
+        lecturas_primera += 1
+        if lecturas_primera == 1:
+            primera_pausada.set()
+            return {"type": "http.request", "body": cuerpo[:8], "more_body": True}
+        await terminar_primera.wait()
+        return {"type": "http.request", "body": cuerpo[8:], "more_body": False}
+
+    async def recibir_segunda():
+        return {"type": "http.request", "body": cuerpo, "more_body": False}
+
+    async def escenario():
+        tarea = asyncio.create_task(
+            subir_entrega(
+                peticion(recibir_primera),
+                "react",
+                4,
+                "IMG_1234.mov",
+            )
+        )
+        await primera_pausada.wait()
+        with pytest.raises(HTTPException) as error:
+            await subir_entrega(
+                peticion(recibir_segunda),
+                "react",
+                4,
+                "IMG_1234.mov",
+            )
+        assert error.value.status_code == 409
+        terminar_primera.set()
+        return await tarea
+
+    resultado = asyncio.run(escenario())
+
+    assert resultado.archivo == "IMG_1234.mov"
 
 
 def test_nombre_ya_colocado_en_videos_da_409(entregas):
@@ -252,6 +423,47 @@ def test_delete_borra_toma_y_todos_sus_analisis(entregas):
     assert not (analisis / "IMG_1234.mov.json").exists()
     assert not (analisis / "IMG_1234.mov.wav").exists()
     assert (analisis / "otra.mov.json").is_file()
+
+
+def test_delete_borra_analisis_antes_que_video(entregas, monkeypatch):
+    _, cliente, leccion = entregas
+    assert _subir(cliente, "IMG_1234.mov", _video(64)).status_code == 201
+    carpeta = leccion / "grabaciones" / "entregas"
+    analisis = carpeta / ".analisis"
+    analisis.mkdir()
+    (analisis / "IMG_1234.mov.json").write_text("{}", encoding="utf-8")
+    borrados: list[str] = []
+    unlink_real = modulo_entregas.os.unlink
+
+    def registrar_unlink(ruta, *args, **kwargs):
+        borrados.append(str(ruta))
+        return unlink_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(modulo_entregas.os, "unlink", registrar_unlink)
+
+    respuesta = cliente.delete(
+        f"{RUTA_ENTREGAS}/IMG_1234.mov",
+        headers={"X-Estudio-Token": TOKEN, "Content-Length": "0"},
+    )
+
+    assert respuesta.status_code == 204
+    assert borrados == ["IMG_1234.mov.json", "IMG_1234.mov"]
+
+
+def test_delete_exige_el_nombre_con_mayusculas_exacto(entregas):
+    _, cliente, leccion = entregas
+    carpeta = leccion / "grabaciones" / "entregas"
+    carpeta.mkdir(parents=True)
+    original = carpeta / "img_1234.mov"
+    original.write_bytes(b"original")
+
+    respuesta = cliente.delete(
+        f"{RUTA_ENTREGAS}/IMG_1234.mov",
+        headers={"X-Estudio-Token": TOKEN, "Content-Length": "0"},
+    )
+
+    assert respuesta.status_code == 404
+    assert original.read_bytes() == b"original"
 
 
 def test_delete_inexistente_da_404(entregas):
@@ -367,3 +579,26 @@ def test_fallo_no_borra_la_leccion_existente(entregas):
 
     assert respuesta.status_code == 422
     assert leccion.is_dir()
+
+
+def test_limpieza_no_borra_entregas_si_hay_otra_subida_en_curso(entregas):
+    _, _, leccion = entregas
+    carpeta = leccion / "grabaciones" / "entregas"
+    carpeta.mkdir(parents=True)
+    clave = (carpeta, "OTRA.mov")
+    with modulo_entregas._BLOQUEO_INSTALACION:
+        modulo_entregas._SUBIDAS_EN_CURSO.add(clave)
+    try:
+        modulo_entregas._borrar_directorios_vacios((carpeta,))
+        assert carpeta.is_dir()
+    finally:
+        with modulo_entregas._BLOQUEO_INSTALACION:
+            modulo_entregas._SUBIDAS_EN_CURSO.discard(clave)
+
+
+def test_docstring_carpeta_entregas_documenta_none_y_enlaces_simbolicos():
+    documentacion = inspect.getdoc(carpeta_entregas) or ""
+
+    assert "None" in documentacion
+    assert "OSError" in documentacion
+    assert "enlace" in documentacion.casefold()
