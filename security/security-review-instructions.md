@@ -176,6 +176,123 @@ Amplían las decisiones anteriores; lo que no se cite aquí sigue igual.
   abrir cualquier ruta bajo `datos/`, y una guarda de sesión comprueba además
   que `datos/` no cambia.
 
+## Precedentes de la fase 6 (entregas de tomas)
+
+Amplían las decisiones anteriores; lo que no se cite aquí sigue igual.
+
+- **Límite de 4 GiB solo en la ruta de entregas.** `PUT
+  /api/cursos/{curso}/lecciones/{numero}/entregas/<un segmento>` admite hasta
+  `4_294_967_296` bytes y un `Content-Length` de hasta 10 dígitos; si se
+  supera, 413 «La toma supera el límite de 4 GiB». El patrón exige la forma
+  literal de la ruta (número sin ceros a la izquierda) y un único segmento:
+  un nombre con `/` (también `%2F`) cae en el límite general de 256 KB. El
+  resto de rutas y métodos mantiene sus límites. No hay tope de subidas
+  simultáneas ni comprobación de espacio libre: se acepta (exige el token).
+- **Subida a `grabaciones/entregas/`.**
+  - El nombre cumple
+    `^[A-Za-z0-9_(][A-Za-z0-9 _().-]{0,115}\.(?i:mov|mp4)$`: solo ASCII, sin
+    barra, sin punto ni guion inicial. Con otro nombre se responde 422 sin
+    leer el cuerpo.
+  - `Content-Type` tiene que ser `video/quicktime` o `video/mp4` (si no,
+    415), y los bytes 4–8 tienen que ser `ftyp` (si no, 422).
+  - La carpeta de la lección se resuelve dentro de `CURSOS_DIR`, como en la
+    fase 4. `grabaciones/`, `entregas/`, `videos/` y `.analisis/` tienen que
+    ser directorios literales.
+  - El temporal es `.<archivo>.subiendo`. Se crea con
+    `O_CREAT|O_EXCL|O_NOFOLLOW`, permisos `0600` y `dir_fd` sobre `entregas/`
+    abierta con `O_NOFOLLOW`. Se instala con `os.link(...,
+    follow_symlinks=False)` y nunca pisa nada: si el nombre ya existe en
+    `entregas/` o en `grabaciones/videos/`, 409. Si la subida falla o se
+    corta, el temporal se borra.
+  - Un temporal regular que quede de una subida anterior se borra al volver
+    a subir ese mismo nombre (un enlace da 503). Un SIGKILL deja el temporal
+    oculto en disco; se acepta.
+  - `DELETE` solo borra la entrega regular con el nombre exacto, sus
+    `.analisis/<archivo>.{json,wav,origen}` regulares (nombres exactos, no
+    por prefijo) y su entrada de `propuesta.json`, que se borra si queda
+    vacía. `propuesta.json` se abre con `O_NOFOLLOW`: un enlace da 503.
+- **`propuesta.json` es un dato no confiable.** La escribe
+  `identificar-tomas`, pero la API la trata como entrada externa:
+  - se abre con `O_NOFOLLOW|O_NONBLOCK` y tiene que ser un archivo regular de
+    tamaño no mayor que `MAX_TAMANO_JSON`;
+  - `version` tiene que ser `1` y `guion` el del archivo de guion real; la API
+    usa siempre el nombre del archivo de guion, nunca el que trae el JSON;
+  - cada entrada pasa por Pydantic estricto: nombre con el patrón de subida y
+    presente en `entregas/` con el mismo tamaño que `bytes`, números finitos
+    dentro de `[0, duracion + 0.005]` (redondeo de la herramienta; al
+    escribir en el guion se limitan a `duracion`), destinos que existen en
+    el guion y tantos `cues` como el guion. Las entradas que no cumplen se
+    descartan.
+
+  Ningún valor del archivo forma una ruta salvo `archivo`, ya validado. Una
+  propuesta tiene que referirse al mismo archivo que se analizó (`bytes`
+  igual al tamaño actual) y el texto de un cierre pasa por
+  `validar_texto_toma` (una línea, sin controles ni bidireccionales, hasta
+  2000 caracteres) antes de llegar a `shorts.json`; si no cumple, 422 sin
+  tocar nada. Resueltos L1 y L2 de `security/reviews/2026-11-18-fase-6.md`.
+- **Escrituras de colocar.**
+  - En `CURSOS_DIR`: mueve `entregas/<archivo>` a
+    `grabaciones/videos/<archivo>` sin pisar (409), borra
+    `.analisis/<archivo>.{json,wav,origen}` y reescribe o borra
+    `entregas/propuesta.json`.
+  - En `ESTUDIO_DIR`:
+    - `public/grabaciones/<guion>/E<NN>.mov` y
+      `lecciones/tomas/<guion>/E<NN>-camara.json`;
+    - `public/shorts/l<N>/tomas/{original/,}<id>.mov`;
+    - `shorts/l<N>/tomas/<id>.{json,wav}`;
+    - `shorts/l<N>/shorts.json` (`tomas` y `ganchosEntregados`, que se crea
+      vacío si falta; un cierre no pisa un `tomas[<id>]` que ya exista);
+    - `escenas[].toma` del guion: `original`, `video`, `desde`, `hasta` y
+      `cues`.
+  - `<id>` son 8 caracteres hexadecimales en mayúsculas, tomados del nombre
+    `Facetune` o del SHA-256 del nombre.
+  - Todas las rutas son literales: un enlace en cualquier componente da 503
+    con mensaje fijo y no se toca nada. Los temporales
+    `.<nombre>.colocando<ext>` se crean con `O_EXCL|O_NOFOLLOW`, después de
+    borrar con `unlink` lo que hubiera.
+  - Lo que se sustituye se archiva en `anteriores/` (`instalar_archivando`).
+  - El guion y `shorts.json` se escriben con `escribir_json_versionado`: doble
+    comprobación de SHA-256 y una sola copia `.antes-de-editar`.
+  - Si algo falla antes de terminar, se deshace todo en orden inverso. Un
+    cambio hecho desde fuera de la API no se pisa al deshacer.
+- **Acciones de la fase 6.** El catálogo cerrado suma tres acciones:
+  - `identificar-tomas`: `node herramientas/identificar-tomas.mjs <guion>`,
+    con `CURSOS_DIR`, tiempo máximo de 1 h. Escribe `.analisis/` y
+    `propuesta.json` en `entregas/` (alcance de la herramienta);
+  - `color-ganchos`: `node herramientas/color/ganchos.mjs l<N>`, sin
+    `CURSOS_DIR`, 1 h;
+  - `mejorar-toma`: `/bin/zsh -f herramientas/superres/superres.sh
+    <original> <temporal>`, 3 h. Del cliente solo llega `escena`
+    (`^E[0-9]{2}$`, una escena de cámara del guion). `<original>` es la ruta
+    absoluta de `toma.original` del guion, que tiene que ser
+    `grabaciones/videos/[<subcarpeta>/]<nombre>` literal dentro de la carpeta
+    de la lección: subcarpeta opcional de un nivel `[a-z0-9-]+`, nombre con
+    `PATRON_ARCHIVO_ENTREGA` (`.mov`/`.mp4`), sin enlaces en ningún
+    componente y archivo regular. Si no, 409 «Esa escena aún no tiene toma».
+    - El resultado se instala archivando en
+      `ESTUDIO_DIR/public/grabaciones/<guion>/E<NN>.mov`.
+    - Después se guarda una copia durable en
+      `<lección>/grabaciones/videos/ia/E<NN>.mov`, archivando la anterior.
+      Primero se copia a `.E<NN>.copiando.mov` con `O_EXCL|O_NOFOLLOW`; ese
+      temporal se borra antes de cada lanzamiento.
+    - Las carpetas de los dos destinos son literales y se crean nivel a
+      nivel dentro de `lanzar`.
+- **Ocupación y cerrojos.**
+  - Colocar es síncrona y ocupa el hueco global de los trabajos
+    (`ocupar_sin_trabajo`, dentro del mismo `_BLOQUEO` que `lanzar`). Mientras
+    dura, `lanzar` responde 409, y colocar responde 409 si hay un trabajo vivo
+    o una fila `en_marcha` en la base.
+  - Colocar y `PUT …/guion/textos` comparten un `RLock` del guion
+    (`cerrojo_escritura_guion`). El orden de los cerrojos es siempre guion →
+    trabajos.
+  - `identificar-tomas` ocupa la lección para `PUT …/guion/textos` y para
+    `PUT` y `DELETE` de `…/entregas/<archivo>` (409 «lección ocupada» antes
+    de leer el cuerpo; resuelto L1). No ocupa `PUT …/grabaciones/E<NN>`: la
+    herramienta no lee las tomas de voz.
+- **Enlaces duros.** `O_NOFOLLOW` y `S_ISREG` no detectan un enlace duro
+  plantado en `entregas/` o `.analisis/`. Se acepta: plantarlo exige escribir
+  en `CURSOS_DIR` y poder leer ya el archivo de destino.
+
 ## Hallazgos prioritarios
 
 - Cualquier ruta derivada de una petición que pueda escapar de las raíces tras

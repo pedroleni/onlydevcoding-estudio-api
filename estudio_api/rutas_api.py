@@ -1,4 +1,5 @@
 import sqlite3
+from collections.abc import Collection
 from contextlib import closing
 from typing import Annotated, cast
 
@@ -21,6 +22,7 @@ from estudio_api.tareas import (
     borrar_curso_app,
     crear_curso_app,
 )
+from estudio_api.trabajos import hay_trabajo_en_leccion
 
 router = APIRouter(prefix="/api")
 CursoId = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,40}$")]
@@ -28,9 +30,28 @@ NumeroLeccion = Annotated[int, Path(ge=1, le=999)]
 TrabajoId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
+LECCION_OCUPADA = (
+    "No se puede cambiar mientras se prepara esta lección. "
+    "Espera a que termine el trabajo."
+)
+
+
 def config_peticion(request: Request) -> Config:
     """Configuración de la app que atiende la petición (común a los routers)."""
     return cast(Config, request.app.state.config)
+
+
+def exigir_leccion_libre(
+    config: Config,
+    curso: str,
+    numero: int,
+    acciones: Collection[str],
+) -> None:
+    """409 si alguna de ``acciones`` está en marcha en la lección."""
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        ocupada = hay_trabajo_en_leccion(bd, curso, numero, acciones)
+    if ocupada:
+        raise HTTPException(status_code=409, detail=LECCION_OCUPADA)
 
 
 @router.get("/cursos", response_model=list[Curso])

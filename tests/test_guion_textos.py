@@ -387,6 +387,27 @@ def test_version_antigua_devuelve_409_y_conserva_el_cambio_externo(textos_guion)
     assert ruta.read_text(encoding="utf-8") == externo
 
 
+def test_fallo_de_escritura_devuelve_503_y_no_un_conflicto(textos_guion, monkeypatch):
+    cliente, _, _, _ = textos_guion
+
+    def fallar_escritura(*_args, **_kwargs):
+        raise OSError("fallo simulado")
+
+    monkeypatch.setattr(
+        "estudio_api.rutas_teleprompter.escribir_json_versionado",
+        fallar_escritura,
+    )
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        [{"id": "E03", "cues": ["Primera frase.", "Texto nuevo."]}],
+    )
+
+    assert respuesta.status_code == 503
+    assert respuesta.json()["detail"] == "No se han podido guardar los textos"
+
+
 def test_relee_el_archivo_justo_antes_de_escribir(textos_guion, monkeypatch):
     cliente, ruta, _, _ = textos_guion
     version = _version(cliente)

@@ -1,6 +1,4 @@
 import hashlib
-import json
-import threading
 from contextlib import closing
 from typing import Annotated
 
@@ -11,15 +9,20 @@ from starlette.requests import ClientDisconnect
 
 from estudio_api.acciones import (
     ACCIONES_QUE_LEEN_LA_LECCION,
+    ACCIONES_QUE_LEEN_LA_VOZ,
     SIN_GUION,
     AccionNoDisponible,
     OpcionesAccion,
     plan_accion,
 )
-from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
-from estudio_api.escritura import escribir_atomico
-from estudio_api.guion_textos import CambiosTextos, aplicar_textos
+from estudio_api.guion_textos import (
+    CambiosTextos,
+    ConflictoEscrituraGuion,
+    aplicar_textos,
+    cerrojo_escritura_guion,
+    escribir_json_versionado,
+)
 from estudio_api.lectura import datos_curso
 from estudio_api.rutas_acciones import lanzar_plan
 from estudio_api.rutas_api import (
@@ -27,6 +30,7 @@ from estudio_api.rutas_api import (
     NumeroLeccion,
     TrabajoId,
     config_peticion,
+    exigir_leccion_libre,
 )
 from estudio_api.teleprompter import (
     Teleprompter,
@@ -40,32 +44,14 @@ from estudio_api.tomas import (
     WavInvalido,
     guardar_toma,
 )
-from estudio_api.trabajos import Trabajo, hay_trabajo_en_leccion, leer_trabajo
+from estudio_api.trabajos import Trabajo, leer_trabajo
 
 router = APIRouter(prefix="/api")
-_BLOQUEO_TEXTOS = threading.Lock()
 EscenaId = Annotated[str, Path(pattern=r"^E[0-9]{2}$")]
-LECCION_OCUPADA = (
-    "No se puede cambiar mientras se prepara esta lección. "
-    "Espera a que termine el trabajo."
-)
 
 
 class PeticionPrevia(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-def _exigir_leccion_libre(config: Config, curso: str, numero: int) -> None:
-    """409 si una herramienta está leyendo el guion o las tomas de la lección."""
-    with closing(abrir_bd(config.bd_ruta)) as bd:
-        ocupada = hay_trabajo_en_leccion(
-            bd,
-            curso,
-            numero,
-            ACCIONES_QUE_LEEN_LA_LECCION,
-        )
-    if ocupada:
-        raise HTTPException(status_code=409, detail=LECCION_OCUPADA)
 
 
 @router.get(
@@ -102,16 +88,16 @@ def guardar_textos_guion(
     conflicto = "El guion ha cambiado fuera de la app. Recarga antes de guardar."
     if not cambios.escenas and cambios.ganchos is None:
         raise HTTPException(status_code=422, detail="No hay cambios que guardar")
-    with _BLOQUEO_TEXTOS:
-        _exigir_leccion_libre(config, curso, numero)
+    with cerrojo_escritura_guion():
+        # Ninguna herramienta que lea el guion puede estar en marcha.
+        exigir_leccion_libre(config, curso, numero, ACCIONES_QUE_LEEN_LA_LECCION)
         leido = datos_curso(config, curso)
         datos_guion = leido[2].get(numero) if leido is not None else None
         if datos_guion is None:
             raise HTTPException(status_code=404, detail="La lección no existe")
         guion = datos_guion[2]
         ruta = datos_guion[3]
-        contenido_inicial = datos_guion[4]
-        version_inicial = hashlib.sha256(contenido_inicial).hexdigest()
+        version_inicial = hashlib.sha256(datos_guion[4]).hexdigest()
         if version_inicial != cambios.version:
             raise HTTPException(status_code=409, detail=conflicto)
         try:
@@ -120,15 +106,14 @@ def guardar_textos_guion(
             mensaje = str(error)
             raise HTTPException(status_code=422, detail=mensaje) from error
         try:
-            contenido_actual = ruta.read_bytes()
-        except OSError as error:
+            escribir_json_versionado(ruta, guion_actualizado, version_inicial)
+        except ConflictoEscrituraGuion as error:
             raise HTTPException(status_code=409, detail=conflicto) from error
-        if hashlib.sha256(contenido_actual).hexdigest() != version_inicial:
-            raise HTTPException(status_code=409, detail=conflicto)
-        contenido = json.dumps(guion_actualizado, ensure_ascii=False, indent=2) + "\n"
-        if contenido.encode("utf-8") != contenido_actual:
-            # Sin cambios no se escribe: subir el mtime marcaría «Guion cambiado».
-            escribir_atomico(ruta, contenido)
+        except OSError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="No se han podido guardar los textos",
+            ) from error
         with closing(abrir_bd(config.bd_ruta)) as bd:
             teleprompter = leer_teleprompter(config, bd, curso, numero)
         if teleprompter is None:
@@ -156,7 +141,10 @@ async def subir_toma_voz(
     longitud = int(request.headers["content-length"])
     config = config_peticion(request)
     # Antes de leer el cuerpo: no tiene sentido recibir la toma para nada.
-    await run_in_threadpool(_exigir_leccion_libre, config, curso, numero)
+    # ``identificar-tomas`` no lee las tomas de voz, así que no la bloquea.
+    await run_in_threadpool(
+        exigir_leccion_libre, config, curso, numero, ACCIONES_QUE_LEEN_LA_VOZ
+    )
     try:
         return await guardar_toma(
             config,

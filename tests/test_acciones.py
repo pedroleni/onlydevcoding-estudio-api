@@ -29,6 +29,7 @@ from estudio_api.trabajos import (
     listar_trabajos,
 )
 from tests.ayudas import TOKEN
+from tests.test_tomas import _wav
 
 CABECERAS = {"X-Estudio-Token": TOKEN}
 RUTA_ACCIONES = "/api/cursos/react/lecciones/4/acciones"
@@ -358,6 +359,367 @@ def test_plan_accion_construye_los_siete_comandos_exactos(catalogo, monkeypatch)
     )
 
 
+def _preparar_acciones_de_tomas(catalogo):
+    carpeta = catalogo["carpeta"]
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "titulo": "Escena ficticia de cámara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": "grabaciones/videos/original.mov"},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+    original = carpeta / "grabaciones" / "videos" / "original.mov"
+    original.parent.mkdir()
+    original.write_bytes(b"original-ficticio")
+    entregas = carpeta / "grabaciones" / "entregas"
+    entregas.mkdir()
+    (entregas / "Facetune12345678.MOV").write_bytes(b"entrega-ficticia")
+    shorts = json.loads(catalogo["shorts"].read_text(encoding="utf-8"))
+    shorts["ganchosEntregados"] = {"g1": "12345678"}
+    catalogo["shorts"].write_text(json.dumps(shorts), encoding="utf-8")
+    return original
+
+
+def test_plan_accion_construye_los_tres_comandos_de_tomas(catalogo, monkeypatch):
+    config = catalogo["config"]
+    carpeta = catalogo["carpeta"]
+    original = _preparar_acciones_de_tomas(catalogo)
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+
+    identificar = plan_accion(config, "react", 4, "identificar-tomas", OpcionesAccion())
+    color = plan_accion(
+        config, "react", 4, "color-ganchos", OpcionesAccion(gancho="g1")
+    )
+    mejorar = plan_accion(
+        config, "react", 4, "mejorar-toma", OpcionesAccion(escena="E17")
+    )
+
+    destino = config.estudio_dir / "public" / "grabaciones" / "react-04" / "E17.mov"
+    temporal = destino.with_name(".E17.generando.mov")
+    assert identificar.comando == [
+        "/bin-falso/node",
+        "herramientas/identificar-tomas.mjs",
+        "react-04",
+    ]
+    assert identificar.entorno == {"CURSOS_DIR": str(config.cursos_dir)}
+    assert color.comando == [
+        "/bin-falso/node",
+        "herramientas/color/ganchos.mjs",
+        "l4",
+        "12345678",
+    ]
+    assert color.objetivo == "g1"
+    assert mejorar.comando == [
+        "/bin/zsh",
+        "-f",
+        "herramientas/superres/superres.sh",
+        str(original),
+        str(temporal),
+    ]
+    assert mejorar.objetivo == "E17"
+    assert mejorar.temporal == temporal
+    assert mejorar.destino == destino
+    assert mejorar.copia == carpeta / "grabaciones" / "videos" / "ia" / "E17.mov"
+    assert mejorar.instalar == "archivar"
+    assert identificar.tiempo_maximo == color.tiempo_maximo == 60 * 60
+    assert mejorar.tiempo_maximo == 3 * 60 * 60
+    assert identificar.patron_progreso == color.patron_progreso == PROGRESO_HERRAMIENTA
+    assert mejorar.patron_progreso == PROGRESO_NINGUNO
+    assert all(
+        plan.mensajes == MENSAJES_HERRAMIENTA for plan in (identificar, color, mejorar)
+    )
+
+
+def test_identificar_tomas_sin_entregas_da_409(catalogo):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "identificar-tomas",
+            OpcionesAccion(),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "No hay tomas entregadas"
+
+
+@pytest.mark.parametrize("gancho", [None, "g1"])
+def test_color_ganchos_sin_ganchos_entregados_da_409(catalogo, gancho):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "color-ganchos",
+            OpcionesAccion(gancho=gancho),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "No hay ganchos entregados"
+
+
+def _ganchos_entregados(catalogo, entregados):
+    shorts = json.loads(catalogo["shorts"].read_text(encoding="utf-8"))
+    shorts["ganchosEntregados"] = entregados
+    catalogo["shorts"].write_text(json.dumps(shorts), encoding="utf-8")
+
+
+def test_color_ganchos_procesa_solo_el_gancho_elegido(catalogo, monkeypatch):
+    _ganchos_entregados(catalogo, {"g1": "12345678", "g2": "ABCDEF12"})
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+
+    plan = plan_accion(
+        catalogo["config"], "react", 4, "color-ganchos", OpcionesAccion(gancho="g2")
+    )
+
+    assert plan.comando == [
+        "/bin-falso/node",
+        "herramientas/color/ganchos.mjs",
+        "l4",
+        "ABCDEF12",
+    ]
+    assert plan.objetivo == "g2"
+
+
+@pytest.mark.parametrize("gancho", [None, "g9", "g2"])
+def test_color_ganchos_con_gancho_no_entregado_da_422(catalogo, monkeypatch, gancho):
+    # g2 tiene una toma con id inválido: no cuenta como entregado.
+    _ganchos_entregados(catalogo, {"g1": "12345678", "g2": "../malo"})
+
+    def no_buscar(_nombre):
+        raise AssertionError("No se debe buscar ningún binario")
+
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", no_buscar)
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "color-ganchos",
+            OpcionesAccion(gancho=gancho),
+        )
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Ese gancho no está entregado"
+
+
+def test_post_color_ganchos_valida_el_gancho(catalogo, monkeypatch):
+    _ganchos_entregados(catalogo, {"g1": "12345678"})
+    llamadas = []
+    monkeypatch.setattr(
+        "estudio_api.rutas_acciones.lanzar", lambda *args: llamadas.append(args)
+    )
+    ruta = f"{RUTA_ACCIONES}/color-ganchos"
+    cliente = catalogo["cliente"]
+
+    sin_gancho = cliente.post(ruta, headers=CABECERAS, json={})
+    no_entregado = cliente.post(ruta, headers=CABECERAS, json={"gancho": "g2"})
+    manipulado = cliente.post(ruta, headers=CABECERAS, json={"gancho": "../g1"})
+    largo = cliente.post(ruta, headers=CABECERAS, json={"gancho": "g" * 41})
+
+    assert sin_gancho.status_code == 422
+    assert sin_gancho.json()["detail"] == "Ese gancho no está entregado"
+    assert no_entregado.status_code == 422
+    assert no_entregado.json()["detail"] == "Ese gancho no está entregado"
+    assert manipulado.status_code == 422
+    assert largo.status_code == 422
+    assert llamadas == []
+
+
+def test_color_ganchos_lista_ganchos_entregados_y_ultimo_por_gancho(catalogo):
+    _ganchos_entregados(
+        catalogo,
+        {"g1": "12345678", "g2": "ABCDEF12", "g3": "minusc12", "../g4": "0A1B2C3D"},
+    )
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd, bd:
+        bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('color-ganchos', 'react', 4, 'g1', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        cursor = bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('color-ganchos', 'react', 4, 'g2', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        ultimo_id = cursor.lastrowid
+
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    assert respuesta.status_code == 200
+    color = {accion["id"]: accion for accion in respuesta.json()}["color-ganchos"]
+    assert color["disponible"] is True
+    assert color["opciones"] == ["g1", "g2"]
+    assert set(color["ultimos"]) == {"g1", "g2"}
+    assert color["ultimos"]["g2"]["id"] == ultimo_id
+    assert color["ultimo"]["id"] == ultimo_id
+
+
+def test_color_ganchos_sin_ganchos_entregados_mantiene_el_motivo(catalogo):
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    color = {accion["id"]: accion for accion in respuesta.json()}["color-ganchos"]
+    assert color["disponible"] is False
+    assert color["motivo"] == "No hay ganchos entregados"
+    assert color["opciones"] == []
+    assert color["ultimos"] == {}
+
+
+def test_mejorar_toma_rechaza_escena_inexistente(catalogo):
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E99"),
+        )
+
+    assert captura.value.estado_http == 422
+    assert captura.value.mensaje == "Esa escena no existe"
+
+
+def test_mejorar_toma_lista_escenas_con_toma_y_ultimo_por_escena(catalogo):
+    _preparar_acciones_de_tomas(catalogo)
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(catalogo["config"].bd_ruta)) as bd, bd:
+        cursor = bd.execute(
+            """
+            INSERT INTO trabajo (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('mejorar-toma', 'react', 4, 'E17', 'hecho', ?)
+            """,
+            (inicio,),
+        )
+        trabajo_id = cursor.lastrowid
+
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+
+    assert respuesta.status_code == 200
+    acciones = {accion["id"]: accion for accion in respuesta.json()}
+    assert acciones["mejorar-toma"]["opciones"] == ["E17"]
+    assert acciones["mejorar-toma"]["ultimo"]["id"] == trabajo_id
+    assert acciones["mejorar-toma"]["ultimos"]["E17"]["id"] == trabajo_id
+
+
+@pytest.mark.parametrize("original", [None, "../../fuera.mov"])
+def test_mejorar_toma_rechaza_escena_sin_original_seguro(catalogo, original):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    escena = {
+        "id": "E17",
+        "modo": "camara",
+        "titulo": "Escena ficticia",
+        "cues": [{"texto": "Texto ficticio."}],
+    }
+    if original is not None:
+        escena["toma"] = {"original": original}
+    guion["escenas"].append(escena)
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
+def test_mejorar_toma_rechaza_original_absoluto(catalogo, tmp_path):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": str(tmp_path / "fuera.mov")},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
+def test_mejorar_toma_rechaza_enlace_a_original_de_otra_leccion(catalogo):
+    otra = catalogo["config"].cursos_dir / "REACT" / "05-otra"
+    original_ajeno = otra / "grabaciones" / "videos" / "ajeno.mov"
+    original_ajeno.parent.mkdir(parents=True)
+    original_ajeno.write_bytes(b"original-ajeno")
+    enlace = catalogo["carpeta"] / "grabaciones" / "videos" / "enlace.mov"
+    enlace.parent.mkdir(parents=True, exist_ok=True)
+    enlace.symlink_to(original_ajeno)
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": "grabaciones/videos/enlace.mov"},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
+def test_preparar_mejorar_toma_limpia_temporal_de_copia_anterior(catalogo):
+    _preparar_acciones_de_tomas(catalogo)
+    plan = plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "mejorar-toma",
+        OpcionesAccion(escena="E17"),
+    )
+    assert plan.copia is not None
+    temporal_copia = plan.copia.with_name(".E17.copiando.mov")
+    temporal_copia.parent.mkdir(parents=True, exist_ok=True)
+    temporal_copia.write_bytes(b"copia-interrumpida")
+
+    assert plan.preparar is not None
+    plan.preparar()
+
+    assert not temporal_copia.exists()
+
+
 def test_video_final_usa_slug_de_la_carpeta_en_disco(catalogo):
     guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
     guion["carpeta"] = "REACT/04-slug-declarado-en-guion"
@@ -483,6 +845,9 @@ def test_get_acciones_calcula_disponibilidad_y_opciones(catalogo):
         "video-final",
         "preparar-shorts",
         "render-short",
+        "identificar-tomas",
+        "color-ganchos",
+        "mejorar-toma",
     ]
     assert acciones["alinear-voz"]["disponible"] is False
     assert acciones["alinear-voz"]["motivo"] == "No hay voz grabada que alinear"
@@ -503,6 +868,7 @@ def test_get_acciones_distingue_leccion_sin_guion(catalogo):
         "preparar-montaje",
         "previa-grabacion",
         "render-leccion",
+        "mejorar-toma",
     ):
         assert acciones[accion]["disponible"] is False
         assert acciones[accion]["motivo"] == "Esta lección aún no tiene guion"
@@ -510,7 +876,13 @@ def test_get_acciones_distingue_leccion_sin_guion(catalogo):
 
 @pytest.mark.parametrize(
     "accion",
-    ["alinear-voz", "preparar-montaje", "previa-grabacion", "render-leccion"],
+    [
+        "alinear-voz",
+        "preparar-montaje",
+        "previa-grabacion",
+        "render-leccion",
+        "mejorar-toma",
+    ],
 )
 def test_post_accion_en_leccion_sin_guion_da_409(catalogo, accion):
     catalogo["guion"].unlink()
@@ -903,7 +1275,8 @@ def test_put_textos_mientras_se_prepara_el_montaje_da_409(catalogo, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "accion", ["alinear-voz", "preparar-montaje", "preparar-shorts"]
+    "accion",
+    ["alinear-voz", "preparar-montaje", "preparar-shorts"],
 )
 def test_put_textos_y_toma_con_trabajo_de_la_leccion_dan_409(
     catalogo, monkeypatch, accion
@@ -1255,3 +1628,129 @@ def test_con_otro_trabajo_en_marcha_no_se_crea_ni_se_borra_nada(catalogo, monkey
     assert final.status_code == 409
     assert not (carpeta / "shorts").exists()
     assert temporal_ajeno.read_bytes() == b"lo escribe otro trabajo"
+
+
+def test_identificar_tomas_bloquea_los_textos_pero_no_la_voz(catalogo):
+    cliente = catalogo["cliente"]
+    _registrar_en_marcha(catalogo["config"], "identificar-tomas")
+    antes = catalogo["guion"].read_bytes()
+    nueva = _wav(relleno=7)
+
+    textos = _guardar_textos(cliente, "Texto cambiado.")
+    toma = cliente.put(
+        RUTA_TOMA,
+        headers={**CABECERAS, "Content-Type": "audio/wav"},
+        content=nueva,
+    )
+
+    assert textos.status_code == 409
+    assert textos.json()["detail"] == MENSAJE_LECCION_OCUPADA
+    assert catalogo["guion"].read_bytes() == antes
+    assert toma.status_code == 201
+    assert catalogo["toma"].read_bytes() == nueva
+
+
+def _escena_con_original(catalogo, original):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"] = [e for e in guion["escenas"] if e["id"] != "E17"]
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": original},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+
+def _plan_mejorar(catalogo):
+    return plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "mejorar-toma",
+        OpcionesAccion(escena="E17"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "archivo"),
+    [
+        ("grabaciones/videos/notas.txt", "grabaciones/videos/notas.txt"),
+        ("notas-privadas.mov", "notas-privadas.mov"),
+        ("grabaciones/notas.mov", "grabaciones/notas.mov"),
+        ("grabaciones/videos/.oculto.mov", "grabaciones/videos/.oculto.mov"),
+        ("grabaciones/videos/Sin Rosa/a.mov", "grabaciones/videos/Sin Rosa/a.mov"),
+        ("grabaciones/videos/a/b/c.mov", "grabaciones/videos/a/b/c.mov"),
+        ("grabaciones/videos/../videos/a.mov", "grabaciones/videos/a.mov"),
+        ("grabaciones/videos/carpeta.mov", None),
+    ],
+)
+def test_mejorar_toma_exige_un_video_literal_en_grabaciones_videos(
+    catalogo, monkeypatch, original, archivo
+):
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+    carpeta = catalogo["carpeta"]
+    if archivo is None:
+        (carpeta / "grabaciones" / "videos" / "carpeta.mov").mkdir(parents=True)
+    else:
+        (carpeta / archivo).parent.mkdir(parents=True, exist_ok=True)
+        (carpeta / archivo).write_bytes(b"no es un original")
+    _escena_con_original(catalogo, original)
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        _plan_mejorar(catalogo)
+    acciones = {
+        accion["id"]: accion for accion in catalogo["cliente"].get(RUTA_ACCIONES).json()
+    }
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+    assert acciones["mejorar-toma"]["opciones"] == []
+
+
+def test_mejorar_toma_rechaza_original_enlazado_dentro_de_la_leccion(catalogo):
+    carpeta = catalogo["carpeta"]
+    (carpeta / "notas-privadas.txt").write_text("no es un vídeo", encoding="utf-8")
+    videos = carpeta / "grabaciones" / "videos"
+    videos.mkdir(parents=True)
+    (videos / "enlace.mov").symlink_to(carpeta / "notas-privadas.txt")
+    real = carpeta / "grabaciones" / "reales"
+    real.mkdir()
+    (real / "a.mov").write_bytes(b"original")
+    (videos / "sin-rosa").symlink_to(real)
+    _escena_con_original(catalogo, "grabaciones/videos/enlace.mov")
+
+    with pytest.raises(AccionNoDisponible):
+        _plan_mejorar(catalogo)
+
+    _escena_con_original(catalogo, "grabaciones/videos/sin-rosa/a.mov")
+    with pytest.raises(AccionNoDisponible):
+        _plan_mejorar(catalogo)
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "grabaciones/videos/Facetune12345678 2.MOV",
+        "grabaciones/videos/sin-rosa/Facetune12345678 (1).mov",
+        "grabaciones/videos/clip-01.mp4",
+    ],
+)
+def test_mejorar_toma_admite_originales_a_mano_y_subcarpeta(
+    catalogo, monkeypatch, original
+):
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+    ruta = catalogo["carpeta"] / original
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_bytes(b"original-ficticio")
+    _escena_con_original(catalogo, original)
+
+    plan = _plan_mejorar(catalogo)
+
+    assert plan.comando[3] == str(ruta.resolve())

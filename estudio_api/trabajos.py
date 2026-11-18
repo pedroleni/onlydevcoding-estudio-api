@@ -3,13 +3,14 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import stat
 import subprocess
 import threading
-from collections.abc import Callable, Collection, Mapping
-from contextlib import closing
+from collections.abc import Callable, Collection, Iterator, Mapping
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 _BLOQUEO = threading.Lock()
 _HILOS: dict[int, threading.Thread] = {}
+# Una operación síncrona (colocar las tomas) que ocupa el hueco de los trabajos.
+_OCUPADO_SIN_TRABAJO = False
 
 PROGRESO_REMOTION = re.compile(r"(\d+)/(\d+)")
 PROGRESO_HERRAMIENTA = re.compile(r"^PROGRESO (\d+)/(\d+)$")
@@ -75,6 +78,7 @@ class PlanTrabajo:
     cwd: Path
     temporal: Path | None = None
     destino: Path | None = None
+    copia: Path | None = None
     instalar: Literal["reemplazar", "sin_pisar", "archivar"] = "reemplazar"
     entorno: Mapping[str, str] = field(default_factory=dict)
     patron_progreso: re.Pattern[str] = PROGRESO_REMOTION
@@ -417,30 +421,12 @@ def _ruta_archivada(destino: Path) -> Path:
         indice += 1
 
 
-def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
-    """Instala el temporal en su destino sin seguir enlaces simbólicos.
-
-    El temporal tiene que ser un archivo regular y el destino, si existe,
-    también; ``anteriores/`` tiene que ser un directorio real. Si algo no
-    cuadra no se mueve ni se pisa nada.
-    """
-    temporal = plan.temporal
-    destino = plan.destino
-    if temporal is None or destino is None:
-        return
-    _exigir_temporal_regular(temporal)
+def instalar_archivando(temporal: Path, destino: Path) -> Path | None:
+    """Instala ``temporal`` en ``destino``; devuelve dónde quedó el anterior."""
     destino_existente = _destino_actual(destino)
-    if plan.instalar == "reemplazar":
-        os.replace(temporal, destino)
-        return
-    if plan.instalar == "sin_pisar":
-        os.link(temporal, destino, follow_symlinks=False)
-        _borrar_temporal_sin_fallar(temporal, trabajo_id)
-        return
-
     if destino_existente is None:
         os.replace(temporal, destino)
-        return
+        return None
     archivado = _ruta_archivada(destino)
     os.replace(destino, archivado)
     try:
@@ -453,6 +439,88 @@ def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
                 "No se pudo restaurar el resultado anterior tras fallar la instalación",
                 exc_info=True,
             )
+        raise
+    return archivado
+
+
+def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
+    """Instala el temporal en su destino sin seguir enlaces simbólicos.
+
+    El temporal tiene que ser un archivo regular y el destino, si existe,
+    también; ``anteriores/`` tiene que ser un directorio real. Si algo no
+    cuadra no se mueve ni se pisa nada.
+    """
+    temporal = plan.temporal
+    destino = plan.destino
+    if temporal is None or destino is None:
+        return
+    _exigir_temporal_regular(temporal)
+    _destino_actual(destino)
+    if plan.instalar == "reemplazar":
+        os.replace(temporal, destino)
+        return
+    if plan.instalar == "sin_pisar":
+        os.link(temporal, destino, follow_symlinks=False)
+        _borrar_temporal_sin_fallar(temporal, trabajo_id)
+        return
+
+    instalar_archivando(temporal, destino)
+
+
+def _temporal_copia(copia: Path) -> Path:
+    return copia.with_name(f".{copia.stem}.copiando{copia.suffix}")
+
+
+def _copiar_resultado(origen: Path, temporal: Path) -> None:
+    """Copia un resultado regular a un temporal nuevo sin seguir enlaces."""
+    temporal.unlink(missing_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor_origen = os.open(origen, os.O_RDONLY | nofollow)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor_origen).st_mode):
+            raise _InstalacionInsegura("El resultado no es un archivo regular")
+        descriptor_temporal = os.open(
+            temporal,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+        try:
+            with (
+                os.fdopen(descriptor_origen, "rb") as fuente,
+                os.fdopen(descriptor_temporal, "wb") as salida,
+            ):
+                descriptor_origen = -1
+                descriptor_temporal = -1
+                shutil.copyfileobj(fuente, salida)
+                salida.flush()
+                os.fsync(salida.fileno())
+        finally:
+            if descriptor_temporal >= 0:
+                os.close(descriptor_temporal)
+    finally:
+        if descriptor_origen >= 0:
+            os.close(descriptor_origen)
+
+
+def _guardar_copia(plan: PlanTrabajo) -> None:
+    """Guarda la copia durable del resultado.
+
+    Un apagado del proceso a mitad de la copia puede dejar
+    ``.<escena>.copiando.mov``. La preparación del siguiente ``mejorar-toma``
+    de esa escena elimina ese temporal antes de lanzar la herramienta.
+    """
+    copia = plan.copia
+    if copia is None:
+        return
+    if plan.destino is None:
+        raise _InstalacionInsegura("La copia no tiene un resultado de origen")
+    temporal = _temporal_copia(copia)
+    try:
+        _copiar_resultado(plan.destino, temporal)
+        _exigir_temporal_regular(temporal)
+        instalar_archivando(temporal, copia)
+    except BaseException:
+        temporal.unlink(missing_ok=True)
         raise
 
 
@@ -625,6 +693,7 @@ def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
 
         try:
             _instalar_resultado(plan, trabajo_id)
+            _guardar_copia(plan)
         except OSError as error:
             if plan.instalar == "sin_pisar" and isinstance(error, FileExistsError):
                 logger.warning("El destino del trabajo %s ya existe", trabajo_id)
@@ -712,7 +781,7 @@ def lanzar(
             en_marcha = bd.execute(
                 "SELECT id, temporal FROM trabajo WHERE estado = 'en_marcha'"
             ).fetchall()
-            if any(
+            if _OCUPADO_SIN_TRABAJO or any(
                 (hilo := _HILOS.get(fila[0])) is not None and hilo.is_alive()
                 for fila in en_marcha
             ):
@@ -790,6 +859,25 @@ def lanzar(
             assert fallido is not None
             return fallido
         return trabajo
+
+
+@contextmanager
+def ocupar_sin_trabajo() -> Iterator[None]:
+    """Ocupa el hueco de los trabajos durante una operación síncrona.
+
+    Mientras dura, ``lanzar`` responde ``TrabajoEnMarcha``; y no se puede
+    ocupar si ya hay un trabajo vivo u otra operación ocupándolo.
+    """
+    global _OCUPADO_SIN_TRABAJO
+    with _BLOQUEO:
+        if _OCUPADO_SIN_TRABAJO or any(hilo.is_alive() for hilo in _HILOS.values()):
+            raise TrabajoEnMarcha
+        _OCUPADO_SIN_TRABAJO = True
+    try:
+        yield
+    finally:
+        with _BLOQUEO:
+            _OCUPADO_SIN_TRABAJO = False
 
 
 def cancelar(bd_ruta: Path, id: int) -> Trabajo | None:

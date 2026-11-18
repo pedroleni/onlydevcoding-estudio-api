@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from estudio_api.config import Config
+from estudio_api.entregas import PATRON_ARCHIVO_ENTREGA, listar_entregas
 from estudio_api.estado import ruta_toma_voz
 from estudio_api.lectura import (
     PATRON_PREVIA,
@@ -46,10 +47,18 @@ IdAccion = Literal[
     "video-final",
     "preparar-shorts",
     "render-short",
+    "identificar-tomas",
+    "color-ganchos",
+    "mejorar-toma",
 ]
 
 PATRON_ID_SHORT = re.compile(r"^[a-z0-9-]{1,60}$")
 PATRON_ID_ESCENA = re.compile(r"^E\d{2}$")
+PATRON_ID_GANCHO = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+# Las tomas verticales entregadas: lo que acepta ``herramientas/color/ganchos.mjs``.
+PATRON_ID_TOMA = re.compile(r"^[0-9A-F]{8}$")
+# Subcarpeta de ``grabaciones/videos/`` de las tomas colocadas a mano.
+PATRON_SUBCARPETA_ORIGINALES = re.compile(r"^[a-z0-9-]+$")
 PROGRESO_NINGUNO = re.compile(r"(?!)")
 
 SIN_GUION = "Esta lección aún no tiene guion"
@@ -60,8 +69,12 @@ CARPETA_PREVIA_NO_PREPARABLE = "No se puede preparar la carpeta de la vista prev
 # Acciones que leen el guion o las tomas de la lección mientras corren: si se
 # cambian a la vez, el montaje sale viejo aunque el estado diga «al día».
 ACCIONES_QUE_LEEN_LA_LECCION = frozenset(
-    {"alinear-voz", "preparar-montaje", "preparar-shorts"}
+    {"alinear-voz", "preparar-montaje", "preparar-shorts", "identificar-tomas"}
 )
+# ``identificar-tomas`` lee los vídeos de ``grabaciones/entregas/``.
+ACCIONES_QUE_LEEN_LAS_ENTREGAS = frozenset({"identificar-tomas"})
+# Las tomas de voz (``grabaciones/E<NN>.wav``) no las lee ``identificar-tomas``.
+ACCIONES_QUE_LEEN_LA_VOZ = ACCIONES_QUE_LEEN_LA_LECCION - ACCIONES_QUE_LEEN_LAS_ENTREGAS
 
 ETIQUETAS: dict[IdAccion, str] = {
     "alinear-voz": "Alinear la voz",
@@ -71,6 +84,9 @@ ETIQUETAS: dict[IdAccion, str] = {
     "video-final": "Crear el vídeo final (−14 LUFS)",
     "preparar-shorts": "Preparar los shorts",
     "render-short": "Renderizar el short",
+    "identificar-tomas": "Identificar las tomas",
+    "color-ganchos": "Ajustar el color de los ganchos",
+    "mejorar-toma": "Mejorar con IA",
 }
 ORDEN_ACCIONES: tuple[IdAccion, ...] = tuple(ETIQUETAS)
 
@@ -80,6 +96,8 @@ class OpcionesAccion(BaseModel):
 
     previa: str | None = None
     short: str | None = None
+    escena: str | None = Field(default=None, pattern=r"^E[0-9]{2}$")
+    gancho: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,40}$")
 
 
 class EstadoAccion(BaseModel):
@@ -423,6 +441,99 @@ def _ids_shorts(contexto: _Contexto) -> list[str]:
     return ids
 
 
+def _datos_shorts(contexto: _Contexto) -> dict[str, Any] | None:
+    if contexto.guion is None:
+        return None
+    try:
+        ruta = ruta_segura(
+            contexto.config.estudio_dir,
+            "shorts",
+            f"l{contexto.numero}",
+            "shorts.json",
+        )
+    except ValueError:
+        return None
+    datos = _leer_json(ruta)
+    if datos is None or datos.get("leccion") != contexto.guion:
+        return None
+    return datos
+
+
+def _ganchos_entregados(contexto: _Contexto) -> dict[str, str]:
+    """Gancho del guion → id de su toma vertical, solo con ids válidos."""
+    datos = _datos_shorts(contexto)
+    entregados = datos.get("ganchosEntregados") if datos is not None else None
+    if not isinstance(entregados, dict):
+        return {}
+    return {
+        gancho: toma
+        for gancho, toma in entregados.items()
+        if isinstance(gancho, str)
+        and PATRON_ID_GANCHO.fullmatch(gancho) is not None
+        and isinstance(toma, str)
+        and PATRON_ID_TOMA.fullmatch(toma) is not None
+    }
+
+
+def _escenas_camara(contexto: _Contexto) -> list[dict[str, Any]]:
+    escenas = (
+        contexto.datos_guion.get("escenas")
+        if contexto.datos_guion is not None
+        else None
+    )
+    if not isinstance(escenas, list):
+        return []
+    return [
+        escena
+        for escena in escenas
+        if isinstance(escena, dict)
+        and escena.get("modo") == "camara"
+        and isinstance(escena.get("id"), str)
+        and PATRON_ID_ESCENA.fullmatch(escena["id"]) is not None
+    ]
+
+
+def _partes_original(original: str) -> tuple[str, ...] | None:
+    """``grabaciones/videos/[<subcarpeta>/]<vídeo>`` o ``None``."""
+    partes = tuple(original.split("/"))
+    if len(partes) not in {3, 4} or partes[:2] != ("grabaciones", "videos"):
+        return None
+    if len(partes) == 4 and PATRON_SUBCARPETA_ORIGINALES.fullmatch(partes[2]) is None:
+        return None
+    if PATRON_ARCHIVO_ENTREGA.fullmatch(partes[-1]) is None:
+        return None
+    return partes
+
+
+def _original_camara(contexto: _Contexto, escena: dict[str, Any]) -> Path | None:
+    """Ruta del vídeo original de una escena de cámara, sin enlaces.
+
+    ``toma.original`` sale del guion: solo vale un vídeo regular dentro de
+    ``grabaciones/videos/`` (o una subcarpeta suya), nunca otro archivo.
+    """
+    toma = escena.get("toma")
+    original = toma.get("original") if isinstance(toma, dict) else None
+    if not isinstance(original, str):
+        return None
+    partes = _partes_original(original)
+    if partes is None:
+        return None
+    try:
+        raiz = contexto.carpeta.resolve()
+        literal = raiz.joinpath(*partes)
+        if ruta_segura(raiz, *partes) != literal:
+            return None
+        actual = raiz
+        for parte in partes:
+            actual /= parte
+            datos = os.lstat(actual)
+            if stat.S_ISLNK(datos.st_mode):
+                return None
+        return literal if stat.S_ISREG(datos.st_mode) else None
+    except OSError, ValueError:
+        return None
+
+
 def _exigir_guion(contexto: _Contexto) -> _Evaluacion | None:
     if contexto.guion is None or contexto.datos_guion is None:
         return _no_disponible(SIN_GUION)
@@ -563,6 +674,82 @@ def _evaluar_render_short(
     return _Evaluacion(True, opciones=tuple(ids))
 
 
+def _evaluar_identificar_tomas(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+    _para_plan: bool,
+) -> _Evaluacion:
+    sin_guion = _exigir_guion(contexto)
+    if sin_guion is not None:
+        return sin_guion
+    try:
+        entregas = listar_entregas(
+            contexto.config,
+            contexto.curso,
+            contexto.numero,
+        )
+    except OSError, ValueError:
+        entregas = None
+    if not entregas:
+        return _no_disponible("No hay tomas entregadas")
+    return _Evaluacion(True)
+
+
+def _evaluar_color_ganchos(
+    contexto: _Contexto,
+    opciones: OpcionesAccion,
+    para_plan: bool,
+) -> _Evaluacion:
+    ganchos = tuple(_ganchos_entregados(contexto))
+    if not ganchos:
+        return _no_disponible("No hay ganchos entregados")
+    if para_plan and opciones.gancho not in ganchos:
+        return _no_disponible(
+            "Ese gancho no está entregado",
+            estado_http=422,
+            opciones=ganchos,
+        )
+    return _Evaluacion(True, opciones=ganchos)
+
+
+def _evaluar_mejorar_toma(
+    contexto: _Contexto,
+    opciones: OpcionesAccion,
+    para_plan: bool,
+) -> _Evaluacion:
+    sin_guion = _exigir_guion(contexto)
+    if sin_guion is not None:
+        return sin_guion
+    escenas = _escenas_camara(contexto)
+    opciones_validas = tuple(
+        escena["id"]
+        for escena in escenas
+        if _original_camara(contexto, escena) is not None
+    )
+    if para_plan:
+        escena = next(
+            (candidata for candidata in escenas if candidata["id"] == opciones.escena),
+            None,
+        )
+        if escena is None:
+            return _no_disponible(
+                "Esa escena no existe",
+                estado_http=422,
+                opciones=opciones_validas,
+            )
+        if _original_camara(contexto, escena) is None:
+            return _no_disponible(
+                "Esa escena aún no tiene toma",
+                opciones=opciones_validas,
+            )
+    if not opciones_validas:
+        return _no_disponible(
+            "No hay escenas de cámara con toma",
+            opciones=opciones_validas,
+        )
+    return _Evaluacion(True, opciones=opciones_validas)
+
+
 _EVALUADORES = {
     "alinear-voz": _evaluar_alinear_voz,
     "preparar-montaje": _evaluar_preparar_montaje,
@@ -571,6 +758,9 @@ _EVALUADORES = {
     "video-final": _evaluar_video_final,
     "preparar-shorts": _evaluar_preparar_shorts,
     "render-short": _evaluar_render_short,
+    "identificar-tomas": _evaluar_identificar_tomas,
+    "color-ganchos": _evaluar_color_ganchos,
+    "mejorar-toma": _evaluar_mejorar_toma,
 }
 
 
@@ -596,6 +786,42 @@ def _binario(nombre: Literal["node", "npx"]) -> str:
 
 def _temporal_oculto(destino: Path) -> Path:
     return destino.with_name(f".{destino.stem}.generando{destino.suffix}")
+
+
+def _destino_en_estudio(contexto: _Contexto, *partes: str) -> Path:
+    raiz = contexto.config.estudio_dir.resolve()
+    literal = raiz.joinpath(*partes)
+    if ruta_segura(raiz, *partes) != literal:
+        raise ValueError("La ruta del resultado contiene enlaces simbólicos")
+    actual = raiz
+    for parte in partes:
+        actual = actual / parte
+        if actual.is_symlink():
+            raise ValueError("La ruta del resultado contiene enlaces simbólicos")
+    return literal
+
+
+def _preparar_mejora(
+    contexto: _Contexto,
+    temporal: Path,
+    copia: Path,
+) -> Callable[[], None]:
+    def preparar() -> None:
+        try:
+            actual_estudio = contexto.config.estudio_dir.resolve()
+            for parte in ("public", "grabaciones", contexto.guion):
+                actual_estudio = actual_estudio / parte
+                _crear_carpeta_real(actual_estudio)
+            actual_leccion = contexto.carpeta.resolve()
+            for parte in ("grabaciones", "videos", "ia"):
+                actual_leccion = actual_leccion / parte
+                _crear_carpeta_real(actual_leccion)
+            _quitar_temporal(temporal)
+            _quitar_temporal(copia.with_name(f".{copia.stem}.copiando{copia.suffix}"))
+        except (OSError, ValueError) as error:
+            raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
+
+    return preparar
 
 
 def _plan_alinear_voz(contexto: _Contexto) -> PlanTrabajo:
@@ -771,6 +997,95 @@ def _plan_render_short(
     )
 
 
+def _plan_identificar_tomas(contexto: _Contexto) -> PlanTrabajo:
+    return PlanTrabajo(
+        accion="identificar-tomas",
+        objetivo=None,
+        comando=[
+            _binario("node"),
+            "herramientas/identificar-tomas.mjs",
+            contexto.guion,
+        ],
+        cwd=contexto.config.estudio_dir,
+        entorno={"CURSOS_DIR": str(contexto.config.cursos_dir)},
+        patron_progreso=PROGRESO_HERRAMIENTA,
+        tiempo_maximo=60 * 60,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+
+def _plan_color_ganchos(
+    contexto: _Contexto,
+    opciones: OpcionesAccion,
+) -> PlanTrabajo:
+    toma = _ganchos_entregados(contexto).get(opciones.gancho)
+    if toma is None:
+        raise AccionNoDisponible(422, "Ese gancho no está entregado")
+    return PlanTrabajo(
+        accion="color-ganchos",
+        objetivo=opciones.gancho,
+        comando=[
+            _binario("node"),
+            "herramientas/color/ganchos.mjs",
+            f"l{contexto.numero}",
+            toma,
+        ],
+        cwd=contexto.config.estudio_dir,
+        patron_progreso=PROGRESO_HERRAMIENTA,
+        tiempo_maximo=60 * 60,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+
+def _plan_mejorar_toma(
+    contexto: _Contexto,
+    opciones: OpcionesAccion,
+) -> PlanTrabajo:
+    escena = next(
+        candidata
+        for candidata in _escenas_camara(contexto)
+        if candidata["id"] == opciones.escena
+    )
+    original = _original_camara(contexto, escena)
+    if original is None:
+        raise AccionNoDisponible(409, "Esa escena aún no tiene toma")
+    destino = _destino_en_estudio(
+        contexto,
+        "public",
+        "grabaciones",
+        contexto.guion,
+        f"{opciones.escena}.mov",
+    )
+    copia = _destino_en_leccion(
+        contexto,
+        "grabaciones",
+        "videos",
+        "ia",
+        f"{opciones.escena}.mov",
+    )
+    temporal = _temporal_oculto(destino)
+    return PlanTrabajo(
+        accion="mejorar-toma",
+        objetivo=opciones.escena,
+        comando=[
+            "/bin/zsh",
+            "-f",
+            "herramientas/superres/superres.sh",
+            str(original),
+            str(temporal),
+        ],
+        cwd=contexto.config.estudio_dir,
+        temporal=temporal,
+        destino=destino,
+        copia=copia,
+        instalar="archivar",
+        patron_progreso=PROGRESO_NINGUNO,
+        tiempo_maximo=3 * 60 * 60,
+        mensajes=MENSAJES_HERRAMIENTA,
+        preparar=_preparar_mejora(contexto, temporal, copia),
+    )
+
+
 def plan_accion(
     config: Config,
     curso: str,
@@ -800,7 +1115,13 @@ def plan_accion(
             return _plan_video_final(contexto, opciones)
         if accion == "preparar-shorts":
             return _plan_preparar_shorts(contexto)
-        return _plan_render_short(contexto, opciones)
+        if accion == "render-short":
+            return _plan_render_short(contexto, opciones)
+        if accion == "identificar-tomas":
+            return _plan_identificar_tomas(contexto)
+        if accion == "color-ganchos":
+            return _plan_color_ganchos(contexto, opciones)
+        return _plan_mejorar_toma(contexto, opciones)
     except ValueError as error:
         raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
 
@@ -824,7 +1145,7 @@ def estados_acciones(
         )
         ultimo = ultimo_trabajo(bd, accion, curso, numero)
         ultimos: dict[str, Trabajo] = {}
-        if accion == "render-short":
+        if accion in {"render-short", "color-ganchos", "mejorar-toma"}:
             for objetivo in evaluacion.opciones:
                 trabajo = ultimo_trabajo(
                     bd,
