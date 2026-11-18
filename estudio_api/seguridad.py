@@ -15,7 +15,7 @@ HOSTS_PERMITIDOS = {"127.0.0.1:8000", "localhost:8000"}
 METODOS_LECTURA = {"GET", "HEAD", "OPTIONS"}
 TAMANO_MAXIMO_CUERPO = 256 * 1024
 MAXIMO_DIGITOS_CONTENT_LENGTH = 7
-LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int]] = [
+LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int, int]] = [
     (
         "PUT",
         re.compile(
@@ -23,7 +23,17 @@ LIMITES_POR_RUTA: list[tuple[str, re.Pattern[str], int]] = [
             r"[1-9][0-9]{0,2}/grabaciones/E[0-9]{2}$"
         ),
         209_715_200,
-    )
+        9,
+    ),
+    (
+        "PUT",
+        re.compile(
+            r"^/api/cursos/[a-z0-9-]{1,40}/lecciones/"
+            r"[1-9][0-9]{0,2}/entregas/[^/]+$"
+        ),
+        4_294_967_296,
+        10,
+    ),
 ]
 
 
@@ -123,10 +133,10 @@ class SeguridadLocalMiddleware:
             ruta = scope.get("path", "")
             limite_cuerpo = TAMANO_MAXIMO_CUERPO
             maximo_digitos = MAXIMO_DIGITOS_CONTENT_LENGTH
-            for metodo_limite, patron, limite in LIMITES_POR_RUTA:
+            for metodo_limite, patron, limite, digitos in LIMITES_POR_RUTA:
                 if metodo == metodo_limite and patron.fullmatch(ruta):
                     limite_cuerpo = limite
-                    maximo_digitos = 9
+                    maximo_digitos = digitos
                     break
 
             if _valores_cabecera(scope, b"transfer-encoding"):
