@@ -419,7 +419,7 @@ def _ruta_archivada(destino: Path) -> Path:
         indice += 1
 
 
-def _instalar_archivando(temporal: Path, destino: Path) -> None:
+def instalar_archivando(temporal: Path, destino: Path) -> None:
     destino_existente = _destino_actual(destino)
     if destino_existente is None:
         os.replace(temporal, destino)
@@ -460,7 +460,7 @@ def _instalar_resultado(plan: PlanTrabajo, trabajo_id: int) -> None:
         _borrar_temporal_sin_fallar(temporal, trabajo_id)
         return
 
-    _instalar_archivando(temporal, destino)
+    instalar_archivando(temporal, destino)
 
 
 def _temporal_copia(copia: Path) -> Path:
@@ -514,7 +514,7 @@ def _guardar_copia(plan: PlanTrabajo) -> None:
     try:
         _copiar_resultado(plan.destino, temporal)
         _exigir_temporal_regular(temporal)
-        _instalar_archivando(temporal, copia)
+        instalar_archivando(temporal, copia)
     except BaseException:
         temporal.unlink(missing_ok=True)
         raise

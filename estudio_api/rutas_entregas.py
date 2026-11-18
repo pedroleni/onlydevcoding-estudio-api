@@ -1,10 +1,18 @@
+from contextlib import closing
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import ClientDisconnect
 
+from estudio_api.colocar import (
+    Asignacion,
+    ColocacionNoValida,
+    ResultadoColocar,
+    colocar_tomas,
+)
 from estudio_api.config import Config
+from estudio_api.decisiones import abrir_bd
 from estudio_api.entregas import (
     ArchivoEntregado,
     EntregaExistente,
@@ -50,6 +58,12 @@ class Entregas(BaseModel):
     archivos: list[ArchivoEntregado] = Field(default_factory=list)
     propuesta: Propuesta | None = None
     destinos: Destinos = Field(default_factory=Destinos)
+
+
+class PeticionColocar(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asignaciones: list[Asignacion] = Field(max_length=200)
 
 
 def _destinos(
@@ -156,6 +170,33 @@ def obtener_entregas(
     if entregas is None:
         raise HTTPException(status_code=404, detail="La lección no existe")
     return Entregas(archivos=entregas, propuesta=propuesta, destinos=destinos)
+
+
+@router.post(
+    "/cursos/{curso}/lecciones/{numero}/entregas/colocar",
+    response_model=ResultadoColocar,
+)
+def colocar_entregas(
+    request: Request,
+    peticion: PeticionColocar,
+    curso: CursoId,
+    numero: NumeroLeccion,
+) -> ResultadoColocar:
+    config = config_peticion(request)
+    try:
+        with closing(abrir_bd(config.bd_ruta)) as bd:
+            return colocar_tomas(
+                config,
+                bd,
+                curso,
+                numero,
+                peticion.asignaciones,
+            )
+    except ColocacionNoValida as error:
+        raise HTTPException(
+            status_code=error.estado_http,
+            detail=error.mensaje,
+        ) from error
 
 
 @router.put(

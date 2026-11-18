@@ -1,6 +1,4 @@
 import hashlib
-import json
-import threading
 from contextlib import closing
 from typing import Annotated
 
@@ -18,8 +16,13 @@ from estudio_api.acciones import (
 )
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
-from estudio_api.escritura import escribir_atomico
-from estudio_api.guion_textos import CambiosTextos, aplicar_textos
+from estudio_api.guion_textos import (
+    CambiosTextos,
+    ConflictoEscrituraGuion,
+    aplicar_textos,
+    cerrojo_escritura_guion,
+    escribir_json_versionado,
+)
 from estudio_api.lectura import datos_curso
 from estudio_api.rutas_acciones import lanzar_plan
 from estudio_api.rutas_api import (
@@ -43,7 +46,6 @@ from estudio_api.tomas import (
 from estudio_api.trabajos import Trabajo, hay_trabajo_en_leccion, leer_trabajo
 
 router = APIRouter(prefix="/api")
-_BLOQUEO_TEXTOS = threading.Lock()
 EscenaId = Annotated[str, Path(pattern=r"^E[0-9]{2}$")]
 LECCION_OCUPADA = (
     "No se puede cambiar mientras se prepara esta lección. "
@@ -102,7 +104,7 @@ def guardar_textos_guion(
     conflicto = "El guion ha cambiado fuera de la app. Recarga antes de guardar."
     if not cambios.escenas and cambios.ganchos is None:
         raise HTTPException(status_code=422, detail="No hay cambios que guardar")
-    with _BLOQUEO_TEXTOS:
+    with cerrojo_escritura_guion():
         _exigir_leccion_libre(config, curso, numero)
         leido = datos_curso(config, curso)
         datos_guion = leido[2].get(numero) if leido is not None else None
@@ -110,8 +112,7 @@ def guardar_textos_guion(
             raise HTTPException(status_code=404, detail="La lección no existe")
         guion = datos_guion[2]
         ruta = datos_guion[3]
-        contenido_inicial = datos_guion[4]
-        version_inicial = hashlib.sha256(contenido_inicial).hexdigest()
+        version_inicial = hashlib.sha256(datos_guion[4]).hexdigest()
         if version_inicial != cambios.version:
             raise HTTPException(status_code=409, detail=conflicto)
         try:
@@ -120,15 +121,9 @@ def guardar_textos_guion(
             mensaje = str(error)
             raise HTTPException(status_code=422, detail=mensaje) from error
         try:
-            contenido_actual = ruta.read_bytes()
-        except OSError as error:
+            escribir_json_versionado(ruta, guion_actualizado, version_inicial)
+        except (ConflictoEscrituraGuion, OSError) as error:
             raise HTTPException(status_code=409, detail=conflicto) from error
-        if hashlib.sha256(contenido_actual).hexdigest() != version_inicial:
-            raise HTTPException(status_code=409, detail=conflicto)
-        contenido = json.dumps(guion_actualizado, ensure_ascii=False, indent=2) + "\n"
-        if contenido.encode("utf-8") != contenido_actual:
-            # Sin cambios no se escribe: subir el mtime marcaría «Guion cambiado».
-            escribir_atomico(ruta, contenido)
         with closing(abrir_bd(config.bd_ruta)) as bd:
             teleprompter = leer_teleprompter(config, bd, curso, numero)
         if teleprompter is None:

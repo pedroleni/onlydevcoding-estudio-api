@@ -1,8 +1,51 @@
 import copy
+import hashlib
+import json
+import threading
 import unicodedata
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from estudio_api.escritura import escribir_atomico
+
+_BLOQUEO_ESCRITURA_GUION = threading.RLock()
+
+
+class ConflictoEscrituraGuion(Exception):
+    pass
+
+
+@contextmanager
+def cerrojo_escritura_guion():
+    """Serializa las escrituras del guion y de sus JSON derivados."""
+    with _BLOQUEO_ESCRITURA_GUION:
+        yield
+
+
+def version_json(ruta: Path) -> tuple[str | None, bytes | None]:
+    """Lee un JSON para una escritura optimista; ``None`` representa que no existe."""
+    try:
+        contenido = ruta.read_bytes()
+    except FileNotFoundError:
+        return None, None
+    return hashlib.sha256(contenido).hexdigest(), contenido
+
+
+def escribir_json_versionado(
+    ruta: Path,
+    datos: dict[str, Any],
+    version_esperada: str | None,
+) -> None:
+    """Escribe JSON con copia inicial si no ha cambiado desde que se leyó."""
+    version_actual, contenido_actual = version_json(ruta)
+    if version_actual != version_esperada:
+        raise ConflictoEscrituraGuion
+    contenido = json.dumps(datos, ensure_ascii=False, indent=2) + "\n"
+    if contenido_actual != contenido.encode("utf-8"):
+        escribir_atomico(ruta, contenido)
 
 
 class CambioEscena(BaseModel):
