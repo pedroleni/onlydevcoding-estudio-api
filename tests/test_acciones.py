@@ -1039,6 +1039,34 @@ def test_temporal_plantado_como_enlace_se_quita_antes_de_lanzar(
     assert not os.path.lexists(directorio / temporal)
 
 
+def test_temporal_de_la_previa_enlazado_no_borra_el_archivo_al_que_apunta(
+    catalogo, monkeypatch
+):
+    config = catalogo["config"]
+    directorio = config.estudio_dir / "out" / "previas-grabacion"
+    directorio.mkdir(parents=True, exist_ok=True)
+    otro = directorio / "otra-leccion.mp4"
+    otro.write_bytes(b"previa de otra leccion")
+    (directorio / "react-04.generando.mp4").symlink_to(otro)
+    npx_falso = config.estudio_dir / "npx-falso"
+    npx_falso.write_text('#!/bin/sh\nprintf previa-nueva > "$6"\n', encoding="utf-8")
+    npx_falso.chmod(0o700)
+    monkeypatch.setattr("estudio_api.acciones.shutil.which", lambda _: str(npx_falso))
+
+    respuesta = catalogo["cliente"].post(
+        f"{RUTA_ACCIONES}/previa-grabacion",
+        headers=CABECERAS,
+        json={},
+    )
+    assert respuesta.status_code == 202
+    esperar(respuesta.json()["id"], 5)
+
+    assert otro.read_bytes() == b"previa de otra leccion"
+    assert not (directorio / "react-04.mp4").is_symlink()
+    assert (directorio / "react-04.mp4").read_bytes() == b"previa-nueva"
+    assert not os.path.lexists(directorio / "react-04.generando.mp4")
+
+
 def test_video_final_con_anteriores_enlazado_fuera_no_mueve_nada(catalogo, monkeypatch):
     config = catalogo["config"]
     youtube = catalogo["carpeta"] / "publicar" / "1-youtube-leccion"

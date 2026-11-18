@@ -119,8 +119,10 @@ def rutas_previa(config: Config, guion: str) -> tuple[Path, Path] | None:
             "out",
             "previas-grabacion",
         )
-        destino = ruta_segura(directorio, f"{guion}.mp4")
-        temporal = ruta_segura(directorio, f"{guion}.generando.mp4")
+        # Solo se resuelve la carpeta: el nombre queda literal para que borrar
+        # un temporal plantado como enlace quite el enlace y no su destino.
+        destino = directorio / f"{guion}.mp4"
+        temporal = directorio / f"{guion}.generando.mp4"
     except ValueError:
         return None
     return temporal, destino
