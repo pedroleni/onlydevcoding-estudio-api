@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,6 +7,32 @@ from fastapi.testclient import TestClient
 from estudio_api.app import crear_app
 from estudio_api.config import Config
 from tests.ayudas import TOKEN
+
+_DATOS_REALES = Path(__file__).resolve().parent.parent / "datos"
+
+
+def _huella_datos() -> dict[str, tuple[int, int]]:
+    if not _DATOS_REALES.is_dir():
+        return {}
+    return {
+        ruta.name: (ruta.stat().st_size, ruta.stat().st_mtime_ns)
+        for ruta in _DATOS_REALES.iterdir()
+        if ruta.is_file()
+    }
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _datos_reales_intactos():
+    """Falla la batería si algún test crea, cambia o borra algo en ``datos/``.
+
+    Ahí vive la base de datos real del autor: los tests usan siempre bases
+    temporales.
+    """
+    antes = _huella_datos()
+    yield
+    assert _huella_datos() == antes, (
+        "Un test ha tocado datos/ (la base de datos real del autor)"
+    )
 
 
 @pytest.fixture
