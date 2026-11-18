@@ -924,6 +924,59 @@ def test_get_acciones_lista_shorts_validos_y_previas(catalogo):
     ]
 
 
+def test_previas_con_apellido_son_opciones_y_cuentan_para_la_version_siguiente(
+    catalogo, monkeypatch
+):
+    directorio = catalogo["carpeta"] / "previa"
+    for ruta in directorio.iterdir():
+        ruta.unlink()
+    nombres = [
+        "previa-v2.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v23.mp4",
+    ]
+    for nombre in nombres:
+        (directorio / nombre).write_bytes(b"video ficticio")
+    (directorio / "previa-v5 x.mp4").write_bytes(b"nombre no valido")
+    (directorio / "previa-v5-..").mkdir()
+    (directorio / "previa-v5-.." / "x.mp4").write_bytes(b"ruta no valida")
+
+    respuesta = catalogo["cliente"].get(RUTA_ACCIONES)
+    acciones = {accion["id"]: accion for accion in respuesta.json()}
+    assert acciones["video-final"]["opciones"] == [
+        "previa-v2.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v23.mp4",
+    ]
+
+    monkeypatch.setattr(
+        "estudio_api.acciones.shutil.which", lambda nombre: f"/bin-falso/{nombre}"
+    )
+    plan_render = plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "render-leccion",
+        OpcionesAccion(),
+    )
+    assert plan_render.destino == directorio / "previa-v24.mp4"
+
+    plan_final = plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "video-final",
+        OpcionesAccion(previa="previa-v13-camaras-reales.mp4"),
+    )
+    assert str(directorio / "previa-v13-camaras-reales.mp4") in plan_final.comando
+
+
 def test_video_final_sin_previas_tiene_el_motivo_literal(catalogo):
     for previa in (catalogo["carpeta"] / "previa").iterdir():
         previa.unlink()

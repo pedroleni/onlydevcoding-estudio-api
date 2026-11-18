@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from estudio_api.config import Config
 from estudio_api.modelos import Avance, EstadoLeccion, EstadoRed
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 
 if TYPE_CHECKING:
@@ -14,7 +15,6 @@ if TYPE_CHECKING:
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_ID_GUION = re.compile(r"^[a-z0-9-]{1,40}-\d{2,3}$")
-PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
 
 
@@ -181,7 +181,14 @@ def _ultima_previa(config: Config, carpeta: Path | None) -> str | None:
     if not versiones:
         return None
 
-    ultima = max(versiones, key=lambda version: version[0])[1]
+    ultima = max(
+        versiones,
+        key=lambda version: (
+            version[0],
+            version[1].name.casefold(),
+            version[1].name,
+        ),
+    )[1]
     relativa = ultima.relative_to(config.cursos_dir.resolve())
     segura = ruta_segura(config.cursos_dir, *relativa.parts)
     return PurePosixPath(

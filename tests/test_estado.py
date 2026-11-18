@@ -155,11 +155,12 @@ def test_directorio_con_extension_mp4_no_es_video_final(cfg):
 
 def test_previa_elige_la_version_numericamente_mas_alta(cfg):
     carpeta = _carpeta_leccion(cfg)
+    (carpeta / "previa" / "previa-v23-con-apellido.mp4").write_bytes(b"video ficticio")
 
     estado = calcular_estado(cfg, "react", 4, carpeta, None)
 
     assert estado.previa is not None
-    assert estado.previa.endswith("/previa/previa-v10.mp4")
+    assert estado.previa.endswith("/previa/previa-v23-con-apellido.mp4")
 
 
 def test_redes(cfg):

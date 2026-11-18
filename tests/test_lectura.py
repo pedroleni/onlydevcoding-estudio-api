@@ -10,6 +10,7 @@ from estudio_api.lectura import (
     leer_leccion,
     leer_lecciones,
 )
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 
 
@@ -365,14 +366,49 @@ def test_portada_de_reel_anterior_se_ignora(cfg):
 
 
 def test_previas_ordenadas_por_numero_de_version(cfg):
+    directorio = cfg.cursos_dir / "REACT" / "04-importar-y-exportar" / "previa"
+    for ruta in directorio.iterdir():
+        ruta.unlink()
+    nombres = [
+        "previa-v2.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v23.mp4",
+    ]
+    for nombre in nombres:
+        (directorio / nombre).write_bytes(b"video ficticio")
+    (directorio / "previa-v5 x.mp4").write_bytes(b"nombre no valido")
+    (directorio / "previa-v5-..").mkdir()
+    (directorio / "previa-v5-.." / "x.mp4").write_bytes(b"ruta no valida")
+
     leccion = leer_leccion(cfg, "react", 4)
 
     assert leccion is not None
     assert [ruta.rsplit("/", 1)[-1] for ruta in leccion.previas] == [
-        "previa-v1.mp4",
         "previa-v2.mp4",
-        "previa-v10.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v23.mp4",
     ]
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        "previa-v5-../x.mp4",
+        "previa-v5 x.mp4",
+    ],
+)
+def test_nombre_de_previa_no_valido_no_coincide(nombre):
+    assert PATRON_PREVIA.fullmatch(nombre) is None
+
+
+def test_nombre_de_previa_no_distingue_mayusculas():
+    assert PATRON_PREVIA.fullmatch("PREVIA-V13-CAMARAS-REALES.MP4") is not None
 
 
 def test_ignora_anteriores_y_descartadas(cfg):

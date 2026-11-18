@@ -17,12 +17,12 @@ from estudio_api.modelos import (
     LeccionResumen,
     Pieza,
 )
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 from estudio_api.tareas import cursos_app
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_CARPETA_LECCION = re.compile(r"^(\d{2,3})-(.+)$")
-PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 PATRON_SHORT = re.compile(r"^short-(\d+)(?:-.+)?\.mp4$", re.IGNORECASE)
 MAX_TAMANO_JSON = 5 * 1024 * 1024
 FPS_MINIMOS = 1.0
@@ -538,7 +538,18 @@ def _previas(config: Config, carpeta: Path | None) -> list[str]:
         directorio,
         lambda nombre: PATRON_PREVIA.fullmatch(nombre) is not None,
     )
-    archivos.sort(key=lambda ruta: int(PATRON_PREVIA.fullmatch(ruta.name).group(1)))
+
+    def clave(ruta: Path) -> tuple[int, bool, str, str]:
+        coincidencia = PATRON_PREVIA.fullmatch(ruta.name)
+        assert coincidencia is not None
+        return (
+            int(coincidencia.group(1)),
+            coincidencia.group(2) is not None,
+            ruta.name.casefold(),
+            ruta.name,
+        )
+
+    archivos.sort(key=clave)
     return [_ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in archivos]
 
 
