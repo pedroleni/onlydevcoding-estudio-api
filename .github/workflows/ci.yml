@@ -16,6 +16,9 @@ jobs:
       - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
         with:
           version: "0.13.8"
+      - name: Instalar zsh
+        # El vídeo final se lanza con /bin/zsh -f, como en el Mac del estudio.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - name: Sincronizar entorno
         run: uv sync --frozen
       - name: Lint
