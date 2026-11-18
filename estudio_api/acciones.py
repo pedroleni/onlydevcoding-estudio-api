@@ -129,7 +129,8 @@ def _contexto(
     if carpeta is None:
         return None
     if numero in guiones:
-        slug, _, guion, ruta_guion, _ = guiones[numero]
+        slug_declarado, _, guion, ruta_guion, _ = guiones[numero]
+        slug = carpetas[numero][0] if numero in carpetas else slug_declarado
         return _Contexto(
             config=config,
             curso=curso,
@@ -224,6 +225,8 @@ def estado_montaje(config: Config, guion: str, carpeta: Path) -> EstadoMontaje:
     try:
         if not montaje.is_file():
             return EstadoMontaje(estado="sin_montaje")
+        if _leer_json(montaje) is None:
+            return EstadoMontaje(estado="sin_montaje")
         fecha_montaje = montaje.stat().st_mtime_ns
     except OSError:
         return EstadoMontaje(estado="sin_montaje")
@@ -245,9 +248,6 @@ def estado_montaje(config: Config, guion: str, carpeta: Path) -> EstadoMontaje:
         try:
             fecha_toma = toma.stat().st_mtime_ns
             fecha_alineacion = alineacion.stat().st_mtime_ns
-        except FileNotFoundError:
-            sin_alinear.append(identificador)
-            continue
         except OSError:
             sin_alinear.append(identificador)
             continue
@@ -307,18 +307,29 @@ def _ids_shorts(contexto: _Contexto) -> list[str]:
     return ids
 
 
-def _exigir_guion(contexto: _Contexto) -> _Evaluacion | None:
+def _exigir_guion(
+    contexto: _Contexto,
+    *,
+    para_plan: bool,
+) -> _Evaluacion | None:
     if contexto.guion is None or contexto.datos_guion is None:
-        return _no_disponible("La lección no existe", estado_http=404)
+        return _no_disponible(
+            (
+                "La lección no existe"
+                if para_plan
+                else "Esta lección aún no tiene guion"
+            ),
+            estado_http=404,
+        )
     return None
 
 
 def _evaluar_alinear_voz(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    _para_plan: bool,
+    para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto)
+    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
     if sin_guion is not None:
         return sin_guion
     tomas = _alineaciones_con_toma(
@@ -335,17 +346,17 @@ def _evaluar_alinear_voz(
 def _evaluar_preparar_montaje(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    _para_plan: bool,
+    para_plan: bool,
 ) -> _Evaluacion:
-    return _exigir_guion(contexto) or _Evaluacion(True)
+    return _exigir_guion(contexto, para_plan=para_plan) or _Evaluacion(True)
 
 
 def _evaluar_previa_grabacion(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    _para_plan: bool,
+    para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto)
+    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
     if sin_guion is not None:
         return sin_guion
     montaje = ruta_montaje(contexto.config, contexto.guion)
@@ -361,9 +372,9 @@ def _evaluar_previa_grabacion(
 def _evaluar_render_leccion(
     contexto: _Contexto,
     _opciones: OpcionesAccion,
-    _para_plan: bool,
+    para_plan: bool,
 ) -> _Evaluacion:
-    sin_guion = _exigir_guion(contexto)
+    sin_guion = _exigir_guion(contexto, para_plan=para_plan)
     if sin_guion is not None:
         return sin_guion
     estado = estado_montaje(contexto.config, contexto.guion, contexto.carpeta).estado
@@ -658,19 +669,25 @@ def plan_accion(
             evaluacion.estado_http,
             evaluacion.motivo or "La acción no está disponible",
         )
-    if accion == "alinear-voz":
-        return _plan_alinear_voz(contexto)
-    if accion == "preparar-montaje":
-        return _plan_preparar_montaje(contexto)
-    if accion == "previa-grabacion":
-        return _plan_previa_grabacion(contexto)
-    if accion == "render-leccion":
-        return _plan_render_leccion(contexto)
-    if accion == "video-final":
-        return _plan_video_final(contexto, opciones)
-    if accion == "preparar-shorts":
-        return _plan_preparar_shorts(contexto)
-    return _plan_render_short(contexto, opciones)
+    try:
+        if accion == "alinear-voz":
+            return _plan_alinear_voz(contexto)
+        if accion == "preparar-montaje":
+            return _plan_preparar_montaje(contexto)
+        if accion == "previa-grabacion":
+            return _plan_previa_grabacion(contexto)
+        if accion == "render-leccion":
+            return _plan_render_leccion(contexto)
+        if accion == "video-final":
+            return _plan_video_final(contexto, opciones)
+        if accion == "preparar-shorts":
+            return _plan_preparar_shorts(contexto)
+        return _plan_render_short(contexto, opciones)
+    except ValueError as error:
+        raise AccionNoDisponible(
+            503,
+            "No se puede preparar la carpeta del resultado",
+        ) from error
 
 
 def estados_acciones(
@@ -703,6 +720,7 @@ def estados_acciones(
                 )
                 if trabajo is not None:
                     ultimos[objetivo] = trabajo
+            ultimo = max(ultimos.values(), key=lambda trabajo: trabajo.id, default=None)
         estados.append(
             EstadoAccion(
                 id=accion,
