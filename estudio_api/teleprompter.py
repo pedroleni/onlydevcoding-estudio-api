@@ -64,6 +64,12 @@ class EstadoPrevia(BaseModel):
     trabajo: Trabajo | None
 
 
+class GanchoGuion(BaseModel):
+    id: str
+    titulo: str
+    texto: str
+
+
 class Teleprompter(BaseModel):
     curso: str
     numero: int
@@ -71,6 +77,7 @@ class Teleprompter(BaseModel):
     titulo: str
     version: str
     escenas: list[EscenaTeleprompter]
+    ganchos: list[GanchoGuion]
     montaje: Montaje | None
     previa: EstadoPrevia
 
@@ -147,6 +154,24 @@ def _cues(valor: object) -> list[CueTeleprompter]:
         )
         for cue in valor
         if isinstance(cue, dict) and isinstance(cue.get("texto"), str)
+    ]
+
+
+def _ganchos(valor: object) -> list[GanchoGuion]:
+    if not isinstance(valor, list):
+        return []
+    return [
+        GanchoGuion(
+            id=gancho["id"],
+            titulo=gancho.get("titulo")
+            if isinstance(gancho.get("titulo"), str)
+            else "",
+            texto=gancho["texto"],
+        )
+        for gancho in valor
+        if isinstance(gancho, dict)
+        and isinstance(gancho.get("id"), str)
+        and isinstance(gancho.get("texto"), str)
     ]
 
 
@@ -360,6 +385,7 @@ def leer_teleprompter(
             carpeta,
             guion,
         ),
+        ganchos=_ganchos(guion.get("ganchos")),
         montaje=_leer_montaje(montaje_ruta, guion),
         previa=_estado_previa(
             config,

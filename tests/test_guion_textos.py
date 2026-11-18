@@ -45,6 +45,10 @@ def textos_guion(cfg):
                 ],
             },
         ],
+        "ganchos": [
+            {"id": "g1", "titulo": "Primer gancho", "texto": "Texto uno."},
+            {"id": "g2", "titulo": "Segundo gancho", "texto": "Texto dos."},
+        ],
         "otro": {"se_conserva": True},
     }
     ruta = cfg.estudio_dir / "lecciones" / "react-04.json"
@@ -64,12 +68,150 @@ def _version(cliente: TestClient) -> str:
     return respuesta.json()["version"]
 
 
-def _guardar(cliente: TestClient, version: str, escenas: list[dict]):
+def _guardar(
+    cliente: TestClient,
+    version: str,
+    escenas: list[dict] | None = None,
+    ganchos: list[dict] | None = None,
+):
+    cuerpo = {"version": version}
+    if escenas is not None:
+        cuerpo["escenas"] = escenas
+    if ganchos is not None:
+        cuerpo["ganchos"] = ganchos
     return cliente.put(
         RUTA_TEXTOS,
         headers=CABECERAS,
-        json={"version": version, "escenas": escenas},
+        json=cuerpo,
     )
+
+
+def test_cambia_frase_y_punto_de_camara_en_la_misma_peticion(textos_guion):
+    cliente, ruta, original, _ = textos_guion
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        [
+            {
+                "id": "E01",
+                "cues": ["Nueva frase de cámara."],
+                "puntos": ["Primer punto", "Nuevo segundo punto"],
+            }
+        ],
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    esperado = copy.deepcopy(original)
+    esperado["escenas"][0]["cues"][0]["texto"] = "Nueva frase de cámara."
+    esperado["escenas"][0]["puntos"][1] = "Nuevo segundo punto"
+    assert guardado == esperado
+
+
+def test_cambia_un_gancho_sin_tocar_sus_metadatos_ni_el_resto(textos_guion):
+    cliente, ruta, original, bytes_originales = textos_guion
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        ganchos=[
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "g2", "texto": "  Gancho actualizado.  "},
+        ],
+    )
+
+    assert respuesta.status_code == 200
+    guardado = json.loads(ruta.read_text(encoding="utf-8"))
+    esperado = copy.deepcopy(original)
+    esperado["ganchos"][1]["texto"] = "Gancho actualizado."
+    assert guardado == esperado
+    assert (
+        ruta.with_name("react-04.json.antes-de-editar").read_bytes() == bytes_originales
+    )
+
+
+@pytest.mark.parametrize(
+    "ganchos",
+    [
+        [{"id": "g1", "texto": "Texto uno."}],
+        [
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "g1", "texto": "Texto repetido."},
+        ],
+        [
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "desconocido", "texto": "Texto desconocido."},
+        ],
+        [
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "g2", "texto": "Dos\nlíneas"},
+        ],
+    ],
+)
+def test_ganchos_invalidos_devuelven_422_y_no_cambian_el_archivo(textos_guion, ganchos):
+    cliente, ruta, _, bytes_originales = textos_guion
+
+    respuesta = _guardar(cliente, _version(cliente), ganchos=ganchos)
+
+    assert respuesta.status_code == 422
+    assert ruta.read_bytes() == bytes_originales
+    assert not ruta.with_name("react-04.json.antes-de-editar").exists()
+
+
+def test_guion_con_ids_de_gancho_repetidos_devuelve_mensaje_fijo(textos_guion):
+    cliente, ruta, _, _ = textos_guion
+    guion = json.loads(ruta.read_text(encoding="utf-8"))
+    guion["ganchos"][1]["id"] = "g1"
+    ruta.write_text(json.dumps(guion, ensure_ascii=False), encoding="utf-8")
+    bytes_antes = ruta.read_bytes()
+
+    respuesta = _guardar(
+        cliente,
+        _version(cliente),
+        ganchos=[
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "g1", "texto": "Texto dos."},
+        ],
+    )
+
+    assert respuesta.status_code == 422
+    assert respuesta.json()["detail"] == "Los ganchos del guion tienen ids repetidos"
+    assert ruta.read_bytes() == bytes_antes
+
+
+def test_peticion_sin_escenas_ni_ganchos_devuelve_mensaje_fijo(textos_guion):
+    cliente, ruta, _, bytes_originales = textos_guion
+
+    respuesta = _guardar(cliente, _version(cliente), escenas=[])
+
+    assert respuesta.status_code == 422
+    assert respuesta.json()["detail"] == "No hay cambios que guardar"
+    assert ruta.read_bytes() == bytes_originales
+
+
+def test_version_antigua_con_solo_ganchos_conserva_el_cambio_externo(textos_guion):
+    cliente, ruta, _, _ = textos_guion
+    version = _version(cliente)
+    externo = ruta.read_text(encoding="utf-8").replace(
+        "Lección ficticia", "Lección cambiada fuera"
+    )
+    ruta.write_text(externo, encoding="utf-8")
+
+    respuesta = _guardar(
+        cliente,
+        version,
+        ganchos=[
+            {"id": "g1", "texto": "Texto uno."},
+            {"id": "g2", "texto": "Texto de la app."},
+        ],
+    )
+
+    assert respuesta.status_code == 409
+    assert respuesta.json()["detail"] == (
+        "El guion ha cambiado fuera de la app. Recarga antes de guardar."
+    )
+    assert ruta.read_text(encoding="utf-8") == externo
 
 
 def test_cambia_una_frase_sin_tocar_el_resto_y_conserva_la_copia_inicial(

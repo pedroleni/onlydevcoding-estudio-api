@@ -13,11 +13,23 @@ class CambioEscena(BaseModel):
     puntos: list[str] | None = None
 
 
+class CambioGancho(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    texto: str
+
+
 class CambiosTextos(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: str = Field(pattern=r"^[0-9a-f]{64}$")
-    escenas: list[CambioEscena] = Field(min_length=1, max_length=200)
+    escenas: list[CambioEscena] = Field(default_factory=list, max_length=200)
+    ganchos: list[CambioGancho] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+    )
 
 
 # Controles bidireccionales de incrustación (U+202A–U+202E) y de aislamiento
@@ -109,6 +121,39 @@ def _aplicar_puntos(
     escena["puntos"] = [_validar_texto(texto) for texto in textos]
 
 
+def _ganchos_validos(guion: dict[str, Any]) -> list[dict[str, Any]]:
+    ganchos = guion.get("ganchos")
+    if not isinstance(ganchos, list):
+        return []
+    return [
+        gancho
+        for gancho in ganchos
+        if isinstance(gancho, dict)
+        and isinstance(gancho.get("id"), str)
+        and isinstance(gancho.get("texto"), str)
+    ]
+
+
+def _aplicar_ganchos(
+    guion: dict[str, Any],
+    cambios: list[CambioGancho],
+) -> None:
+    ganchos = _ganchos_validos(guion)
+    ids_guion = [gancho["id"] for gancho in ganchos]
+    if len(ids_guion) != len(set(ids_guion)):
+        raise ValueError("Los ganchos del guion tienen ids repetidos")
+
+    ids_cambios = [cambio.id for cambio in cambios]
+    if len(ids_cambios) != len(set(ids_cambios)):
+        raise ValueError("Los ganchos enviados tienen ids repetidos")
+    if len(ids_cambios) != len(ids_guion) or set(ids_cambios) != set(ids_guion):
+        raise ValueError("Hay que enviar todos los ganchos del guion una sola vez")
+
+    textos = {cambio.id: _validar_texto(cambio.texto) for cambio in cambios}
+    for gancho in ganchos:
+        gancho["texto"] = textos[gancho["id"]]
+
+
 def aplicar_textos(guion: dict[str, Any], cambios: CambiosTextos) -> dict[str, Any]:
     resultado = copy.deepcopy(guion)
     for cambio in cambios.escenas:
@@ -118,5 +163,9 @@ def aplicar_textos(guion: dict[str, Any], cambios: CambiosTextos) -> dict[str, A
         if cambio.cues is not None:
             _aplicar_cues(escena, cambio.id, cambio.cues)
         if cambio.puntos is not None:
+            if escena.get("modo") != "camara":
+                raise ValueError(f"La escena {cambio.id} no tiene puntos editables")
             _aplicar_puntos(escena, cambio.id, cambio.puntos)
+    if cambios.ganchos is not None:
+        _aplicar_ganchos(resultado, cambios.ganchos)
     return resultado

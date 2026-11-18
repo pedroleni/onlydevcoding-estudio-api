@@ -56,6 +56,12 @@ def teleprompter(cfg):
                 "cues": [{"texto": "Última frase."}],
             },
         ],
+        "ganchos": [
+            {"id": "g1", "titulo": "Primero", "texto": "Texto uno."},
+            {"id": "g2", "texto": "Texto dos."},
+            {"id": "sin-texto", "titulo": "No sale"},
+            {"id": 3, "titulo": "No sale", "texto": "Id inválido"},
+        ],
     }
     bytes_guion = json.dumps(guion, ensure_ascii=False).encode("utf-8")
     (cfg.estudio_dir / "lecciones" / "react-04.json").write_bytes(bytes_guion)
@@ -131,6 +137,10 @@ def test_get_teleprompter_reune_guion_tomas_montaje_y_previa(teleprompter):
     assert datos["numero"] == 4
     assert datos["guion"] == "react-04"
     assert datos["titulo"] == "Lección ficticia"
+    assert datos["ganchos"] == [
+        {"id": "g1", "titulo": "Primero", "texto": "Texto uno."},
+        {"id": "g2", "titulo": "", "texto": "Texto dos."},
+    ]
     assert datos["version"] == hashlib.sha256(bytes_guion).hexdigest()
     assert [escena["id"] for escena in datos["escenas"]] == ["E01", "E03", "E04"]
     assert datos["escenas"][0]["puntos"] == ["Primer punto", "Segundo punto"]
@@ -179,6 +189,23 @@ def test_get_teleprompter_reune_guion_tomas_montaje_y_previa(teleprompter):
         "version": ruta_previa.stat().st_mtime_ns,
         "trabajo": None,
     }
+
+
+@pytest.mark.parametrize("ganchos", [None, 7, {"g1": "Texto"}])
+def test_get_devuelve_ganchos_vacios_si_no_hay_una_lista(teleprompter, ganchos):
+    config, cliente, _, _, _, _ = teleprompter
+    ruta = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(ruta.read_text(encoding="utf-8"))
+    if ganchos is None:
+        guion.pop("ganchos")
+    else:
+        guion["ganchos"] = ganchos
+    ruta.write_text(json.dumps(guion), encoding="utf-8")
+
+    respuesta = cliente.get(RUTA_TELEPROMPTER)
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["ganchos"] == []
 
 
 def test_montaje_roto_se_devuelve_como_null(teleprompter):

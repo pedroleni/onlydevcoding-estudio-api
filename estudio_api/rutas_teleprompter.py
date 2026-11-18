@@ -76,6 +76,8 @@ def guardar_textos_guion(
 ) -> Teleprompter:
     config = _config(request)
     conflicto = "El guion ha cambiado fuera de la app. Recarga antes de guardar."
+    if not cambios.escenas and cambios.ganchos is None:
+        raise HTTPException(status_code=422, detail="No hay cambios que guardar")
     with _BLOQUEO_TEXTOS:
         leido = datos_curso(config, curso)
         datos_guion = leido[2].get(numero) if leido is not None else None
