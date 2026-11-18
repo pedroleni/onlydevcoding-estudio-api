@@ -5,7 +5,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -18,6 +18,11 @@ from estudio_api.entregas import (
 from estudio_api.lectura import MAX_TAMANO_JSON, datos_curso
 
 PATRON_ESCENA_CAMARA = re.compile(r"^E[0-9]{2}$")
+_SIN_DATOS = object()
+NumeroEstricto = Annotated[
+    float,
+    Field(strict=True, allow_inf_nan=False),
+]
 
 
 class DestinoPropuesta(BaseModel):
@@ -36,15 +41,13 @@ class DestinoPropuesta(BaseModel):
 
 
 class Candidato(DestinoPropuesta):
-    puntuacion: float = Field(ge=0, le=1, allow_inf_nan=False)
-    desde: float = Field(ge=0, allow_inf_nan=False)
-    hasta: float = Field(ge=0, allow_inf_nan=False)
-    cues: list[float] | None = None
+    puntuacion: NumeroEstricto = Field(ge=0, le=1)
+    desde: NumeroEstricto = Field(ge=0)
+    hasta: NumeroEstricto = Field(ge=0)
+    cues: list[NumeroEstricto] | None = None
 
     @model_validator(mode="after")
     def validar_cues_finitos(self) -> Self:
-        if self.tipo == "gancho" and "cues" in self.model_fields_set:
-            raise ValueError("Un gancho no lleva cues")
         if self.tipo == "camara" and self.cues is None:
             raise ValueError("Una escena de cámara exige cues")
         if self.cues is not None and any(
@@ -61,9 +64,9 @@ class TomaPropuesta(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     archivo: str
-    bytes: int = Field(ge=0)
+    bytes: int = Field(ge=0, strict=True)
     orientacion: Literal["horizontal", "vertical"]
-    duracion: float = Field(gt=0, allow_inf_nan=False)
+    duracion: NumeroEstricto = Field(gt=0)
     texto: str = Field(max_length=2000)
     propuesta: DestinoPropuesta | None
     repite: DestinoPropuesta | None
@@ -158,12 +161,13 @@ def _toma_valida_para_guion(
 def _leer_json_propuesta(carpeta: Path) -> dict[str, Any] | None:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor_carpeta = os.open(carpeta, os.O_RDONLY | directory | nofollow)
         try:
             descriptor = os.open(
                 "propuesta.json",
-                os.O_RDONLY | nofollow,
+                os.O_RDONLY | nofollow | nonblock,
                 dir_fd=descriptor_carpeta,
             )
         finally:
@@ -193,16 +197,18 @@ def leer_propuesta(
     config: Config,
     curso: str,
     numero: int,
+    *,
+    datos: Any = _SIN_DATOS,
 ) -> Propuesta | None:
-    leido = datos_curso(config, curso)
+    leido = datos_curso(config, curso) if datos is _SIN_DATOS else datos
     datos_guion = leido[2].get(numero) if leido is not None else None
     if datos_guion is None:
         return None
     guion = datos_guion[2]
     identificador_guion = datos_guion[3].stem
     try:
-        carpeta = carpeta_entregas(config, curso, numero)
-        entregadas = listar_entregas(config, curso, numero)
+        carpeta = carpeta_entregas(config, curso, numero, datos=leido)
+        entregadas = listar_entregas(config, curso, numero, datos=leido)
     except OSError:
         return None
     if carpeta is None or entregadas is None:
@@ -220,7 +226,13 @@ def leer_propuesta(
     archivos_en_disco = {entrega.archivo for entrega in entregadas}
     camara, ganchos = _destinos_guion(guion)
     archivos: list[TomaPropuesta] = []
+    nombres_vistos: set[str] = set()
     for datos_toma in datos["archivos"]:
+        nombre = datos_toma.get("archivo") if isinstance(datos_toma, dict) else None
+        if isinstance(nombre, str):
+            if nombre in nombres_vistos:
+                continue
+            nombres_vistos.add(nombre)
         try:
             toma = TomaPropuesta.model_validate(datos_toma)
         except TypeError, ValidationError:

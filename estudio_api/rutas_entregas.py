@@ -1,9 +1,10 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 
+from estudio_api.config import Config
 from estudio_api.entregas import (
     ArchivoEntregado,
     EntregaExistente,
@@ -51,8 +52,14 @@ class Entregas(BaseModel):
     destinos: Destinos = Field(default_factory=Destinos)
 
 
-def _destinos(config, curso: str, numero: int) -> Destinos:
-    leido = datos_curso(config, curso)
+def _destinos(
+    config: Config,
+    curso: str,
+    numero: int,
+    *,
+    datos: Any,
+) -> Destinos:
+    leido = datos
     datos_guion = leido[2].get(numero) if leido is not None else None
     if datos_guion is None:
         return Destinos()
@@ -96,7 +103,7 @@ def _destinos(config, curso: str, numero: int) -> Destinos:
                 DestinoCamara(
                     id=identificador,
                     titulo=titulo if isinstance(titulo, str) else identificador,
-                    tiene_toma="toma" in escena,
+                    tiene_toma=isinstance(escena.get("toma"), dict),
                 )
             )
 
@@ -137,9 +144,10 @@ def obtener_entregas(
 ) -> Entregas:
     config = config_peticion(request)
     try:
-        entregas = listar_entregas(config, curso, numero)
-        propuesta = leer_propuesta(config, curso, numero)
-        destinos = _destinos(config, curso, numero)
+        datos = datos_curso(config, curso)
+        entregas = listar_entregas(config, curso, numero, datos=datos)
+        propuesta = leer_propuesta(config, curso, numero, datos=datos)
+        destinos = _destinos(config, curso, numero, datos=datos)
     except OSError as error:
         raise HTTPException(
             status_code=503,

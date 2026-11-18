@@ -516,6 +516,83 @@ def test_mejorar_toma_rechaza_escena_sin_original_seguro(catalogo, original):
     assert captura.value.mensaje == "Esa escena aún no tiene toma"
 
 
+def test_mejorar_toma_rechaza_original_absoluto(catalogo, tmp_path):
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": str(tmp_path / "fuera.mov")},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
+def test_mejorar_toma_rechaza_enlace_a_original_de_otra_leccion(catalogo):
+    otra = catalogo["config"].cursos_dir / "REACT" / "05-otra"
+    original_ajeno = otra / "grabaciones" / "videos" / "ajeno.mov"
+    original_ajeno.parent.mkdir(parents=True)
+    original_ajeno.write_bytes(b"original-ajeno")
+    enlace = catalogo["carpeta"] / "grabaciones" / "videos" / "enlace.mov"
+    enlace.parent.mkdir(parents=True, exist_ok=True)
+    enlace.symlink_to(original_ajeno)
+    guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
+    guion["escenas"].append(
+        {
+            "id": "E17",
+            "modo": "camara",
+            "cues": [{"texto": "Texto ficticio."}],
+            "toma": {"original": "grabaciones/videos/enlace.mov"},
+        }
+    )
+    catalogo["guion"].write_text(json.dumps(guion), encoding="utf-8")
+
+    with pytest.raises(AccionNoDisponible) as captura:
+        plan_accion(
+            catalogo["config"],
+            "react",
+            4,
+            "mejorar-toma",
+            OpcionesAccion(escena="E17"),
+        )
+
+    assert captura.value.estado_http == 409
+    assert captura.value.mensaje == "Esa escena aún no tiene toma"
+
+
+def test_preparar_mejorar_toma_limpia_temporal_de_copia_anterior(catalogo):
+    _preparar_acciones_de_tomas(catalogo)
+    plan = plan_accion(
+        catalogo["config"],
+        "react",
+        4,
+        "mejorar-toma",
+        OpcionesAccion(escena="E17"),
+    )
+    assert plan.copia is not None
+    temporal_copia = plan.copia.with_name(".E17.copiando.mov")
+    temporal_copia.parent.mkdir(parents=True, exist_ok=True)
+    temporal_copia.write_bytes(b"copia-interrumpida")
+
+    assert plan.preparar is not None
+    plan.preparar()
+
+    assert not temporal_copia.exists()
+
+
 def test_video_final_usa_slug_de_la_carpeta_en_disco(catalogo):
     guion = json.loads(catalogo["guion"].read_text(encoding="utf-8"))
     guion["carpeta"] = "REACT/04-slug-declarado-en-guion"
@@ -664,6 +741,7 @@ def test_get_acciones_distingue_leccion_sin_guion(catalogo):
         "preparar-montaje",
         "previa-grabacion",
         "render-leccion",
+        "mejorar-toma",
     ):
         assert acciones[accion]["disponible"] is False
         assert acciones[accion]["motivo"] == "Esta lección aún no tiene guion"
@@ -671,7 +749,13 @@ def test_get_acciones_distingue_leccion_sin_guion(catalogo):
 
 @pytest.mark.parametrize(
     "accion",
-    ["alinear-voz", "preparar-montaje", "previa-grabacion", "render-leccion"],
+    [
+        "alinear-voz",
+        "preparar-montaje",
+        "previa-grabacion",
+        "render-leccion",
+        "mejorar-toma",
+    ],
 )
 def test_post_accion_en_leccion_sin_guion_da_409(catalogo, accion):
     catalogo["guion"].unlink()

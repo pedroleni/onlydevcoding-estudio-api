@@ -473,7 +473,7 @@ def _original_camara(contexto: _Contexto, escena: dict[str, Any]) -> Path | None
     if not isinstance(original, str):
         return None
     try:
-        ruta = _ruta_en_leccion(contexto, original)
+        ruta = ruta_segura(contexto.carpeta.resolve(), original)
         return ruta if ruta.is_file() else None
     except OSError, ValueError:
         return None
@@ -657,6 +657,9 @@ def _evaluar_mejorar_toma(
     opciones: OpcionesAccion,
     para_plan: bool,
 ) -> _Evaluacion:
+    sin_guion = _exigir_guion(contexto)
+    if sin_guion is not None:
+        return sin_guion
     escenas = _escenas_camara(contexto)
     opciones_validas = tuple(
         escena["id"]
@@ -741,6 +744,7 @@ def _destino_en_estudio(contexto: _Contexto, *partes: str) -> Path:
 def _preparar_mejora(
     contexto: _Contexto,
     temporal: Path,
+    copia: Path,
 ) -> Callable[[], None]:
     def preparar() -> None:
         try:
@@ -753,6 +757,7 @@ def _preparar_mejora(
                 actual_leccion = actual_leccion / parte
                 _crear_carpeta_real(actual_leccion)
             _quitar_temporal(temporal)
+            _quitar_temporal(copia.with_name(f".{copia.stem}.copiando{copia.suffix}"))
         except (OSError, ValueError) as error:
             raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
 
@@ -1010,7 +1015,7 @@ def _plan_mejorar_toma(
         patron_progreso=PROGRESO_NINGUNO,
         tiempo_maximo=3 * 60 * 60,
         mensajes=MENSAJES_HERRAMIENTA,
-        preparar=_preparar_mejora(contexto, temporal),
+        preparar=_preparar_mejora(contexto, temporal, copia),
     )
 
 

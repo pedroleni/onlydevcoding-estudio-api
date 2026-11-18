@@ -499,6 +499,12 @@ def _copiar_resultado(origen: Path, temporal: Path) -> None:
 
 
 def _guardar_copia(plan: PlanTrabajo) -> None:
+    """Guarda la copia durable del resultado.
+
+    Un apagado del proceso a mitad de la copia puede dejar
+    ``.<escena>.copiando.mov``. La preparación del siguiente ``mejorar-toma``
+    de esa escena elimina ese temporal antes de lanzar la herramienta.
+    """
     copia = plan.copia
     if copia is None:
         return

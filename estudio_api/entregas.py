@@ -5,6 +5,7 @@ import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -22,6 +23,7 @@ _BLOQUEO_INSTALACION = threading.Lock()
 _SUBIDAS_EN_CURSO: set[tuple[Path, str]] = set()
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_SIN_DATOS = object()
 
 
 class ArchivoEntregado(BaseModel):
@@ -117,8 +119,14 @@ def _finalizar_subida(
         _borrar_directorios_vacios_sin_bloqueo(directorios)
 
 
-def _carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
-    leido = datos_curso(config, curso)
+def _carpeta_leccion(
+    config: Config,
+    curso: str,
+    numero: int,
+    *,
+    datos: Any = _SIN_DATOS,
+) -> Path | None:
+    leido = datos_curso(config, curso) if datos is _SIN_DATOS else datos
     carpeta = carpeta_de_trabajo(leido, numero)
     if carpeta is None:
         return None
@@ -129,12 +137,18 @@ def _carpeta_leccion(config: Config, curso: str, numero: int) -> Path | None:
         return None
 
 
-def carpeta_entregas(config: Config, curso: str, numero: int) -> Path | None:
+def carpeta_entregas(
+    config: Config,
+    curso: str,
+    numero: int,
+    *,
+    datos: Any = _SIN_DATOS,
+) -> Path | None:
     """Devuelve la ruta literal o ``None`` si la lección no existe.
 
     Puede lanzar ``OSError`` si algún componente es un enlace simbólico.
     """
-    carpeta = _carpeta_leccion(config, curso, numero)
+    carpeta = _carpeta_leccion(config, curso, numero, datos=datos)
     if carpeta is None:
         return None
     grabaciones = _ruta_literal_segura(carpeta, "grabaciones")
@@ -411,8 +425,10 @@ def listar_entregas(
     config: Config,
     curso: str,
     numero: int,
+    *,
+    datos: Any = _SIN_DATOS,
 ) -> list[ArchivoEntregado] | None:
-    carpeta = carpeta_entregas(config, curso, numero)
+    carpeta = carpeta_entregas(config, curso, numero, datos=datos)
     if carpeta is None:
         return None
     if not carpeta.exists():

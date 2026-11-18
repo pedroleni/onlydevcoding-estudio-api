@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from estudio_api import entregas as modulo_entregas
+from estudio_api import propuesta as modulo_propuesta
+from estudio_api import rutas_entregas as modulo_rutas_entregas
 from estudio_api.app import crear_app
 from estudio_api.entregas import carpeta_entregas, guardar_entrega
 from estudio_api.rutas_entregas import subir_entrega
@@ -568,6 +570,42 @@ def test_listado_incluye_destinos_y_estado_de_ganchos(entregas):
             {"id": "g2", "titulo": "Gancho dos ficticio.", "entregado": False},
         ],
     }
+
+
+def test_listado_solo_considera_toma_si_es_un_objeto(entregas):
+    config, cliente, _ = entregas
+    guion_ruta = config.estudio_dir / "lecciones" / "react-04.json"
+    guion = json.loads(guion_ruta.read_text(encoding="utf-8"))
+    guion["escenas"][0]["toma"] = None
+    guion_ruta.write_text(json.dumps(guion), encoding="utf-8")
+
+    respuesta = cliente.get(RUTA_ENTREGAS)
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["destinos"]["camara"][0]["tiene_toma"] is False
+
+
+def test_listado_lee_los_datos_del_curso_una_sola_vez(entregas, monkeypatch):
+    _, cliente, _ = entregas
+    datos_real = modulo_rutas_entregas.datos_curso
+    llamadas = 0
+
+    def contar(config, curso):
+        nonlocal llamadas
+        llamadas += 1
+        return datos_real(config, curso)
+
+    def llamada_duplicada(*_args, **_kwargs):
+        raise AssertionError("datos_curso se ha vuelto a leer")
+
+    monkeypatch.setattr(modulo_rutas_entregas, "datos_curso", contar)
+    monkeypatch.setattr(modulo_entregas, "datos_curso", llamada_duplicada)
+    monkeypatch.setattr(modulo_propuesta, "datos_curso", llamada_duplicada)
+
+    respuesta = cliente.get(RUTA_ENTREGAS)
+
+    assert respuesta.status_code == 200
+    assert llamadas == 1
 
 
 def test_leccion_inexistente_da_404_en_las_tres_rutas(entregas):
