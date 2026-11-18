@@ -24,3 +24,4 @@ Guarda aquí cada auditoría completa, no los chequeos puntuales de una tarea.
 | 2026-11-17 | [2026-11-17-fase-3.md](2026-11-17-fase-3.md) | Rama `feat/fase-3` completa (`main...feat/fase-3`), ocho dominios | BAJO, score 1: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 1 LOW (arreglado), 6 INFO |
 | 2026-11-17 | [2026-11-17-fase-4.md](2026-11-17-fase-4.md) | Rama `feat/fase-4` completa (`main...feat/fase-4`), ocho dominios | BAJO, score 2: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 2 LOW, 6 INFO |
 | 2026-11-18 | [2026-11-18-fase-5.md](2026-11-18-fase-5.md) | Rama `feat/fase-5` completa (`main...feat/fase-5`), ocho dominios | MEDIO, score 5: 0 CRITICAL, 0 HIGH, 1 MEDIUM, 2 LOW, 5 INFO |
+| 2026-11-18 | [2026-11-18-fase-6.md](2026-11-18-fase-6.md) | Rama `feat/fase-6` completa (`main...feat/fase-6`), ocho dominios | BAJO, score 2: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 2 LOW (arreglados), 6 INFO |
