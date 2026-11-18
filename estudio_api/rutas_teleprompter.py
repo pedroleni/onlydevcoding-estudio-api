@@ -31,6 +31,8 @@ from estudio_api.tomas import (
     guardar_toma,
 )
 from estudio_api.trabajos import (
+    MENSAJES_PREVIA,
+    PlanTrabajo,
     Trabajo,
     TrabajoEnMarcha,
     lanzar,
@@ -216,13 +218,18 @@ def generar_previa_grabacion(
     try:
         return lanzar(
             config.bd_ruta,
-            "previa-grabacion",
             curso,
             numero,
-            comando_previa(npx, temporal, teleprompter.guion),
-            config.estudio_dir,
-            temporal,
-            destino,
+            PlanTrabajo(
+                accion="previa-grabacion",
+                objetivo=None,
+                comando=comando_previa(npx, temporal, teleprompter.guion),
+                cwd=config.estudio_dir,
+                temporal=temporal,
+                destino=destino,
+                instalar="reemplazar",
+                mensajes=MENSAJES_PREVIA,
+            ),
         )
     except TrabajoEnMarcha as error:
         raise HTTPException(

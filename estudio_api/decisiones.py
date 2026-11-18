@@ -128,7 +128,8 @@ def _crear_tabla_trabajo(bd: sqlite3.Connection) -> None:
             fin TEXT,
             error TEXT,
             registro TEXT NOT NULL DEFAULT '[]',
-            temporal TEXT
+            temporal TEXT,
+            objetivo TEXT
         )
         """
     )
@@ -163,12 +164,12 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
     try:
         bd.execute("PRAGMA foreign_keys = ON")
         version = bd.execute("PRAGMA user_version").fetchone()[0]
-        if version == 3:
+        if version == 4:
             return bd
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
 
-        if version in (1, 2):
+        if version in (1, 2, 3):
             # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
             # por su propia conexión.
             _copia_antes_de_migrar(bd, ruta, version)
@@ -178,10 +179,10 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
         try:
             bd.execute("BEGIN IMMEDIATE")
             version = bd.execute("PRAGMA user_version").fetchone()[0]
-            if version == 3:
+            if version == 4:
                 bd.execute("COMMIT")
                 return bd
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError(
                     f"Versión de la base de datos no soportada: {version}"
                 )
@@ -189,8 +190,11 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
                 _crear_tablas_fase_2(bd)
             if version in (0, 1):
                 _crear_tablas_tareas(bd)
-            _crear_tabla_trabajo(bd)
-            bd.execute("PRAGMA user_version = 3")
+            if version in (0, 1, 2):
+                _crear_tabla_trabajo(bd)
+            if version == 3:
+                bd.execute("ALTER TABLE trabajo ADD COLUMN objetivo TEXT")
+            bd.execute("PRAGMA user_version = 4")
             bd.execute("COMMIT")
         except Exception:
             if bd.in_transaction:

@@ -16,12 +16,20 @@ import estudio_api.trabajos as modulo_trabajos
 from estudio_api.app import crear_app
 from estudio_api.decisiones import abrir_bd
 from estudio_api.trabajos import (
+    MENSAJES_HERRAMIENTA,
+    MENSAJES_PREVIA,
+    PROGRESO_HERRAMIENTA,
+    PlanTrabajo,
     TrabajoEnMarcha,
+    cancelar,
     esperar,
     interrumpir_huerfanos,
-    lanzar,
     leer_trabajo,
+    listar_trabajos,
     ultimo_trabajo,
+)
+from estudio_api.trabajos import (
+    lanzar as lanzar_plan,
 )
 
 
@@ -39,6 +47,32 @@ def _leer(ruta_bd, trabajo_id):
         trabajo = leer_trabajo(bd, trabajo_id)
     assert trabajo is not None
     return trabajo
+
+
+def lanzar(ruta_bd, *args, tiempo_maximo=None):
+    """Adapta los casos de regresión de fase 4 al único contrato con plan."""
+    if len(args) == 3 and isinstance(args[2], PlanTrabajo):
+        assert tiempo_maximo is None
+        return lanzar_plan(ruta_bd, *args)
+    accion, curso, numero, comando, cwd, temporal, destino = args
+    parametros = {}
+    if tiempo_maximo is not None:
+        parametros["tiempo_maximo"] = tiempo_maximo
+    return lanzar_plan(
+        ruta_bd,
+        curso,
+        numero,
+        PlanTrabajo(
+            accion=accion,
+            objetivo=None,
+            comando=comando,
+            cwd=cwd,
+            temporal=temporal,
+            destino=destino,
+            mensajes=MENSAJES_PREVIA,
+            **parametros,
+        ),
+    )
 
 
 def test_trabajo_termina_bien_y_mueve_el_temporal(tmp_path):
@@ -645,12 +679,12 @@ def test_esquema_trabajo_tiene_los_valores_por_defecto(tmp_path):
         )
         bd.commit()
         fila = bd.execute(
-            "SELECT progreso, registro, curso, numero, fin, error, temporal "
+            "SELECT progreso, registro, curso, numero, fin, error, temporal, objetivo "
             "FROM trabajo WHERE id = ?",
             (cursor.lastrowid,),
         ).fetchone()
 
-    assert fila == (0.0, "[]", None, None, None, None, None)
+    assert fila == (0.0, "[]", None, None, None, None, None, None)
 
 
 # --- Ronda final de la fase 4: timeout, apagado, errores sin rutas y entorno ---
@@ -766,9 +800,7 @@ def test_apagar_la_api_mata_el_render_y_lo_marca_interrumpido(cfg):
         assert _esperar_que_mueran(pids)
         interrumpido = _leer(cfg.bd_ruta, trabajo.id)
         assert interrumpido.estado == "interrumpido"
-        assert interrumpido.error == (
-            "La vista previa se ha interrumpido al cerrar la API"
-        )
+        assert interrumpido.error == "El trabajo se ha interrumpido al cerrar la API"
         assert interrumpido.fin is not None
         assert not temporal.exists()
         assert not (cfg.estudio_dir / "salida.mp4").exists()
@@ -958,3 +990,358 @@ def test_reciclar_una_fila_sin_hilo_borra_su_temporal(tmp_path):
     assert _leer(ruta_bd, huerfano).estado == "interrumpido"
     assert not temporal.exists()
     assert _leer(ruta_bd, nuevo.id).estado == "hecho"
+
+
+# --- Fase 5: planes, instalaciones, cancelación y listado ---
+
+
+def test_plan_de_herramienta_solo_acepta_su_progreso(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    plan = PlanTrabajo(
+        accion="herramienta",
+        objetivo="escenas",
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "print('procesando 3/9 escenas'); "
+                "print('  PROGRESO 1/4  '); "
+                "print('PROGRESO 2/4')"
+            ),
+        ],
+        cwd=tmp_path,
+        patron_progreso=PROGRESO_HERRAMIENTA,
+        mensajes=MENSAJES_HERRAMIENTA,
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "hecho"
+    assert terminado.objetivo == "escenas"
+    assert terminado.progreso == 0.5
+
+
+def test_plan_combina_entorno_minimo_con_su_entorno(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRETO", "no-debe-llegar")
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    salida = tmp_path / "entorno.json"
+    plan = PlanTrabajo(
+        accion="entorno",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            "import json,os,sys; open(sys.argv[1],'w').write(json.dumps(dict(os.environ)))",
+            str(salida),
+        ],
+        cwd=tmp_path,
+        entorno={"CURSOS_DIR": "/cursos-ficticios"},
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 5)
+
+    entorno = json.loads(salida.read_text())
+    assert entorno["CURSOS_DIR"] == "/cursos-ficticios"
+    assert "SECRETO" not in entorno
+
+
+def test_archivar_conserva_el_anterior_e_instala_el_nuevo(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"anterior")
+    plan = PlanTrabajo(
+        accion="video-final",
+        objetivo="previa-v1.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+    assert destino.read_bytes() == b"nuevo"
+    anteriores = list((tmp_path / "anteriores").glob("video-*.mp4"))
+    assert len(anteriores) == 1
+    assert anteriores[0].read_bytes() == b"anterior"
+
+
+def test_archivar_dos_veces_con_la_misma_marca_no_pisa(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        modulo_trabajos, "_marca_archivo", lambda: "20261118T120000123456"
+    )
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"primero")
+
+    def lanzar_archivado(contenido):
+        temporal = tmp_path / ".video.generando.mp4"
+        plan = PlanTrabajo(
+            accion="video-final",
+            objetivo=None,
+            comando=[
+                sys.executable,
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(sys.argv[2].encode())",
+                str(temporal),
+                contenido,
+            ],
+            cwd=tmp_path,
+            temporal=temporal,
+            destino=destino,
+            instalar="archivar",
+        )
+        trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+        esperar(trabajo.id, 5)
+        assert _leer(ruta_bd, trabajo.id).estado == "hecho"
+
+    lanzar_archivado("segundo")
+    lanzar_archivado("tercero")
+
+    anteriores = sorted((tmp_path / "anteriores").glob("video-*.mp4"))
+    assert [ruta.name for ruta in anteriores] == [
+        "video-20261118T120000123456-2.mp4",
+        "video-20261118T120000123456.mp4",
+    ]
+    assert {ruta.read_bytes() for ruta in anteriores} == {b"primero", b"segundo"}
+    assert destino.read_bytes() == b"tercero"
+
+
+def test_archivar_restaura_el_anterior_si_falla_la_instalacion(tmp_path, monkeypatch):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".video.generando.mp4"
+    destino = tmp_path / "video.mp4"
+    destino.write_bytes(b"anterior")
+    reemplazar_real = os.replace
+
+    def reemplazar_con_fallo(origen, final):
+        if os.fspath(origen) == os.fspath(temporal) and os.fspath(final) == os.fspath(
+            destino
+        ):
+            raise OSError("fallo forzado")
+        reemplazar_real(origen, final)
+
+    monkeypatch.setattr(modulo_trabajos.os, "replace", reemplazar_con_fallo)
+    plan = PlanTrabajo(
+        accion="video-final",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')",
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="archivar",
+    )
+
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == "No se pudo guardar el resultado"
+    assert destino.read_bytes() == b"anterior"
+    assert not temporal.exists()
+    assert not list((tmp_path / "anteriores").glob("video-*.mp4"))
+
+
+def test_sin_pisar_no_cambia_un_destino_que_aparece_mientras_corre(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v2.generando.mp4"
+    destino = tmp_path / "previa-v2.mp4"
+    continuar = tmp_path / "continuar"
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo="previa-v2.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time\n"
+                "pathlib.Path(sys.argv[1]).write_bytes(b'nuevo')\n"
+                "p=pathlib.Path(sys.argv[2])\n"
+                "while not p.exists(): time.sleep(.01)\n"
+            ),
+            str(temporal),
+            str(continuar),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="sin_pisar",
+    )
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    limite = time.monotonic() + 5
+    while not temporal.exists() and time.monotonic() < limite:
+        time.sleep(0.01)
+    destino.write_bytes(b"aparecido")
+    continuar.touch()
+    esperar(trabajo.id, 5)
+
+    terminado = _leer(ruta_bd, trabajo.id)
+    assert terminado.estado == "error"
+    assert terminado.error == (
+        "Ya existe una versión con ese número; vuelve a lanzarlo"
+    )
+    assert destino.read_bytes() == b"aparecido"
+    assert not temporal.exists()
+
+
+def test_cancelar_mata_grupo_borra_temporal_y_libera_motor(tmp_path, monkeypatch):
+    monkeypatch.setattr(modulo_trabajos, "_GRACIA_TERMINAR", 2.0)
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".previa-v1.generando.mp4"
+    destino = tmp_path / "previa-v1.mp4"
+    pids_ruta = tmp_path / "pids"
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo="previa-v1.mp4",
+        comando=[
+            sys.executable,
+            "-c",
+            _HIJO_CON_NIETO,
+            str(pids_ruta),
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+        instalar="sin_pisar",
+    )
+    trabajo = lanzar(ruta_bd, "curso-prueba", 2, plan)
+    pids = _esperar_pids(pids_ruta)
+    try:
+        cancelado = cancelar(ruta_bd, trabajo.id)
+
+        assert cancelado is not None
+        assert cancelado.estado == "cancelado"
+        assert cancelado.error == "Cancelado"
+        assert _esperar_que_mueran(pids)
+        assert not temporal.exists()
+        assert not destino.exists()
+        siguiente = lanzar(
+            ruta_bd,
+            None,
+            None,
+            PlanTrabajo(
+                accion="siguiente",
+                objetivo=None,
+                comando=[sys.executable, "-c", "pass"],
+                cwd=tmp_path,
+            ),
+        )
+        esperar(siguiente.id, 5)
+        assert _leer(ruta_bd, siguiente.id).estado == "hecho"
+    finally:
+        _matar_si_quedan(pids)
+
+
+def test_cancelar_un_trabajo_terminado_devuelve_none(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="rapido",
+            objetivo=None,
+            comando=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+        ),
+    )
+    esperar(trabajo.id, 5)
+
+    assert cancelar(ruta_bd, trabajo.id) is None
+
+
+def test_mensaje_de_codigo_de_herramienta(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="herramienta",
+            objetivo=None,
+            comando=[sys.executable, "-c", "raise SystemExit(3)"],
+            cwd=tmp_path,
+            mensajes=MENSAJES_HERRAMIENTA,
+        ),
+    )
+    esperar(trabajo.id, 5)
+
+    assert _leer(ruta_bd, trabajo.id).error == "La herramienta terminó con el código 3"
+
+
+def test_huerfano_usa_el_mensaje_comun_de_api_cerrada(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    with closing(abrir_bd(ruta_bd)) as bd:
+        cursor = bd.execute(
+            "INSERT INTO trabajo (accion, estado, inicio) VALUES (?, 'en_marcha', ?)",
+            ("herramienta", datetime.now().astimezone().isoformat()),
+        )
+        bd.commit()
+        assert interrumpir_huerfanos(bd) == 1
+        trabajo = leer_trabajo(bd, cursor.lastrowid)
+
+    assert trabajo is not None
+    assert trabajo.error == "El trabajo se ha interrumpido al cerrar la API"
+
+
+def test_listar_trabajos_devuelve_los_ultimos_en_orden_descendente(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    with closing(abrir_bd(ruta_bd)) as bd:
+        bd.executemany(
+            "INSERT INTO trabajo (accion, estado, inicio) VALUES (?, 'hecho', ?)",
+            [
+                (f"accion-{indice}", datetime.now().astimezone().isoformat())
+                for indice in range(25)
+            ],
+        )
+        bd.commit()
+        trabajos = listar_trabajos(bd, 20)
+
+    assert len(trabajos) == 20
+    assert [trabajo.id for trabajo in trabajos] == list(range(25, 5, -1))
+
+
+def test_ultimo_trabajo_filtra_por_objetivo(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    inicio = datetime.now().astimezone().isoformat()
+    with closing(abrir_bd(ruta_bd)) as bd:
+        bd.executemany(
+            """
+            INSERT INTO trabajo
+                (accion, curso, numero, objetivo, estado, inicio)
+            VALUES ('render-short', 'curso-prueba', 2, ?, 'hecho', ?)
+            """,
+            [("short-a", inicio), ("short-b", inicio)],
+        )
+        bd.commit()
+
+        primero = ultimo_trabajo(
+            bd, "render-short", "curso-prueba", 2, objetivo="short-a"
+        )
+        segundo = ultimo_trabajo(
+            bd, "render-short", "curso-prueba", 2, objetivo="short-b"
+        )
+        sin_objetivo = ultimo_trabajo(bd, "render-short", "curso-prueba", 2)
+
+    assert primero is not None and primero.objetivo == "short-a"
+    assert segundo is not None and segundo.objetivo == "short-b"
+    assert sin_objetivo is None

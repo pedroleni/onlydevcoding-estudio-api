@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,18 +23,65 @@ logger = logging.getLogger(__name__)
 
 _BLOQUEO = threading.Lock()
 _HILOS: dict[int, threading.Thread] = {}
-_PROGRESO = re.compile(r"(\d+)/(\d+)")
+
+PROGRESO_REMOTION = re.compile(r"(\d+)/(\d+)")
+PROGRESO_HERRAMIENTA = re.compile(r"^PROGRESO (\d+)/(\d+)$")
 
 TIEMPO_MAXIMO_RENDER = 2 * 60 * 60
 _GRACIA_TERMINAR = 10
 _ESPERA_HILOS_AL_APAGAR = 5
 _VARIABLES_ENTORNO = ("PATH", "HOME", "TMPDIR", "LANG", "USER", "NODE_ENV")
 
-# Mensajes fijos: el detalle técnico (excepción y rutas) solo va al log.
-ERROR_ARRANQUE = "No se pudo arrancar el render"
-ERROR_GUARDADO = "No se pudo guardar la vista previa"
-ERROR_TIEMPO = "La vista previa ha tardado demasiado y se ha cancelado"
-ERROR_INTERRUMPIDO = "La vista previa se ha interrumpido al cerrar la API"
+
+@dataclass(frozen=True)
+class Mensajes:
+    codigo: str
+    arranque: str
+    guardado: str
+    tiempo: str
+
+
+MENSAJES_REMOTION = Mensajes(
+    codigo="Remotion terminó con el código {codigo}",
+    arranque="No se pudo arrancar la herramienta",
+    guardado="No se pudo guardar el resultado",
+    tiempo="El trabajo ha tardado demasiado y se ha cancelado",
+)
+MENSAJES_HERRAMIENTA = Mensajes(
+    codigo="La herramienta terminó con el código {codigo}",
+    arranque="No se pudo arrancar la herramienta",
+    guardado="No se pudo guardar el resultado",
+    tiempo="El trabajo ha tardado demasiado y se ha cancelado",
+)
+MENSAJES_PREVIA = Mensajes(
+    codigo="Remotion terminó con el código {codigo}",
+    arranque="No se pudo arrancar el render",
+    guardado="No se pudo guardar la vista previa",
+    tiempo="La vista previa ha tardado demasiado y se ha cancelado",
+)
+
+# Mensajes comunes: el detalle técnico (excepción y rutas) solo va al log.
+ERROR_ARRANQUE = MENSAJES_PREVIA.arranque
+ERROR_GUARDADO = MENSAJES_PREVIA.guardado
+ERROR_TIEMPO = MENSAJES_PREVIA.tiempo
+ERROR_INTERRUMPIDO = "El trabajo se ha interrumpido al cerrar la API"
+ERROR_CANCELADO = "Cancelado"
+ERROR_SIN_PISAR = "Ya existe una versión con ese número; vuelve a lanzarlo"
+
+
+@dataclass(frozen=True)
+class PlanTrabajo:
+    accion: str
+    objetivo: str | None
+    comando: list[str]
+    cwd: Path
+    temporal: Path | None = None
+    destino: Path | None = None
+    instalar: Literal["reemplazar", "sin_pisar", "archivar"] = "reemplazar"
+    entorno: Mapping[str, str] = field(default_factory=dict)
+    patron_progreso: re.Pattern[str] = PROGRESO_REMOTION
+    tiempo_maximo: float = TIEMPO_MAXIMO_RENDER
+    mensajes: Mensajes = MENSAJES_REMOTION
 
 
 @dataclass
@@ -43,9 +91,9 @@ class _EnCurso:
     bd_ruta: Path
     temporal: Path | None
     proceso: subprocess.Popen[bytes] | None = None
-    # None mientras corre; "tiempo", "apagado" o "fin" en cuanto se decide
-    # cómo acaba. Solo se cambia con ``cerrojo``.
-    motivo: Literal["tiempo", "apagado", "fin"] | None = None
+    # None mientras corre; después indica cómo acaba. Solo se cambia con el
+    # cerrojo para que cancelar, el temporizador y el apagado no compitan.
+    motivo: Literal["tiempo", "apagado", "cancelado", "fin"] | None = None
     cerrojo: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -57,7 +105,8 @@ class Trabajo(BaseModel):
     accion: str
     curso: str | None
     numero: int | None
-    estado: Literal["en_marcha", "hecho", "error", "interrumpido"]
+    objetivo: str | None
+    estado: Literal["en_marcha", "hecho", "error", "interrumpido", "cancelado"]
     progreso: float
     inicio: datetime
     fin: datetime | None
@@ -78,18 +127,19 @@ def _desde_fila(fila: sqlite3.Row | tuple) -> Trabajo:
         accion=fila[1],
         curso=fila[2],
         numero=fila[3],
-        estado=fila[4],
-        progreso=fila[5],
-        inicio=fila[6],
-        fin=fila[7],
-        error=fila[8],
+        objetivo=fila[4],
+        estado=fila[5],
+        progreso=fila[6],
+        inicio=fila[7],
+        fin=fila[8],
+        error=fila[9],
     )
 
 
 def leer_trabajo(bd: sqlite3.Connection, id: int) -> Trabajo | None:
     fila = bd.execute(
         """
-        SELECT id, accion, curso, numero, estado, progreso,
+        SELECT id, accion, curso, numero, objetivo, estado, progreso,
                inicio, fin, error
         FROM trabajo
         WHERE id = ?
@@ -104,19 +154,34 @@ def ultimo_trabajo(
     accion: str,
     curso: str | None,
     numero: int | None,
+    objetivo: str | None = None,
 ) -> Trabajo | None:
     fila = bd.execute(
         """
-        SELECT id, accion, curso, numero, estado, progreso,
+        SELECT id, accion, curso, numero, objetivo, estado, progreso,
                inicio, fin, error
         FROM trabajo
-        WHERE accion = ? AND curso IS ? AND numero IS ?
+        WHERE accion = ? AND curso IS ? AND numero IS ? AND objetivo IS ?
         ORDER BY id DESC
         LIMIT 1
         """,
-        (accion, curso, numero),
+        (accion, curso, numero, objetivo),
     ).fetchone()
     return _desde_fila(fila) if fila is not None else None
+
+
+def listar_trabajos(bd: sqlite3.Connection, limite: int) -> list[Trabajo]:
+    filas = bd.execute(
+        """
+        SELECT id, accion, curso, numero, objetivo, estado, progreso,
+               inicio, fin, error
+        FROM trabajo
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limite,),
+    ).fetchall()
+    return [_desde_fila(fila) for fila in filas]
 
 
 def _guardar_avance(
@@ -132,7 +197,7 @@ def _guardar_avance(
 def _finalizar(
     bd_ruta: Path,
     trabajo_id: int,
-    estado: Literal["hecho", "error"],
+    estado: Literal["hecho", "error", "cancelado"],
     progreso: float,
     registro: list[str],
     error: str | None,
@@ -158,7 +223,7 @@ def _finalizar(
 def _finalizar_con_reintento(
     bd_ruta: Path,
     trabajo_id: int,
-    estado: Literal["hecho", "error"],
+    estado: Literal["hecho", "error", "cancelado"],
     progreso: float,
     registro: list[str],
     error: str | None,
@@ -256,6 +321,7 @@ def _incorporar_linea(
     registro: list[str],
     progreso: float,
     *,
+    patron_progreso: re.Pattern[str] = PROGRESO_REMOTION,
     reescribir: bool = False,
 ) -> float:
     if not linea:
@@ -265,7 +331,7 @@ def _incorporar_linea(
     else:
         registro.append(linea[:500])
     del registro[:-40]
-    for coincidencia in _PROGRESO.finditer(linea):
+    for coincidencia in patron_progreso.finditer(linea.strip()):
         actual = int(coincidencia.group(1))
         total = int(coincidencia.group(2))
         if total > 0:
@@ -273,19 +339,59 @@ def _incorporar_linea(
     return progreso
 
 
-def _ejecutar(
-    bd_ruta: Path,
-    trabajo_id: int,
-    comando: list[str],
-    cwd: Path,
-    temporal: Path | None,
-    destino: Path | None,
-    tiempo_maximo: float | None = None,
-) -> None:
+def _marca_archivo() -> str:
+    return datetime.now().strftime("%Y%m%dT%H%M%S%f")
+
+
+def _ruta_archivada(destino: Path) -> Path:
+    anteriores = destino.parent / "anteriores"
+    anteriores.mkdir(parents=True, exist_ok=True)
+    base = f"{destino.stem}-{_marca_archivo()}"
+    indice = 1
+    while True:
+        sufijo = "" if indice == 1 else f"-{indice}"
+        candidata = anteriores / f"{base}{sufijo}{destino.suffix}"
+        if not candidata.exists():
+            return candidata
+        indice += 1
+
+
+def _instalar_resultado(plan: PlanTrabajo) -> None:
+    temporal = plan.temporal
+    destino = plan.destino
+    if temporal is None or destino is None:
+        return
+    if plan.instalar == "reemplazar":
+        os.replace(temporal, destino)
+        return
+    if plan.instalar == "sin_pisar":
+        os.link(temporal, destino)
+        temporal.unlink()
+        return
+
+    if not destino.exists():
+        os.replace(temporal, destino)
+        return
+    archivado = _ruta_archivada(destino)
+    os.replace(destino, archivado)
+    try:
+        os.replace(temporal, destino)
+    except OSError:
+        try:
+            os.replace(archivado, destino)
+        except OSError:
+            logger.critical(
+                "No se pudo restaurar el resultado anterior tras fallar la instalación",
+                exc_info=True,
+            )
+        raise
+
+
+def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
     with _BLOQUEO:
         en_curso = _EN_CURSO.get(trabajo_id)
     if en_curso is None:
-        en_curso = _EnCurso(bd_ruta=bd_ruta, temporal=temporal)
+        en_curso = _EnCurso(bd_ruta=bd_ruta, temporal=plan.temporal)
     registro: list[str] = []
     progreso = 0.0
     proceso: subprocess.Popen[bytes] | None = None
@@ -293,37 +399,47 @@ def _ejecutar(
     try:
         with en_curso.cerrojo:
             if en_curso.motivo is not None:
-                # La API se está apagando: no se arranca nada.
-                _borrar_temporal_sin_fallar(temporal, trabajo_id)
+                # Cancelar o apagar pudo adelantarse al arranque del proceso.
+                motivo_inicial = en_curso.motivo
+                _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
+                if motivo_inicial == "cancelado":
+                    _finalizar_con_reintento(
+                        bd_ruta,
+                        trabajo_id,
+                        "cancelado",
+                        progreso,
+                        registro,
+                        ERROR_CANCELADO,
+                    )
                 return
             try:
                 proceso = subprocess.Popen(
-                    comando,
-                    cwd=cwd,
+                    list(plan.comando),
+                    cwd=plan.cwd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     shell=False,
                     start_new_session=True,
-                    env=_entorno_render(),
+                    env=_entorno_render() | dict(plan.entorno),
                 )
             except OSError:
                 en_curso.motivo = "fin"
                 logger.exception("No se pudo arrancar el trabajo %s", trabajo_id)
-                _borrar_temporal_sin_fallar(temporal, trabajo_id)
+                _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
                 _finalizar_con_reintento(
                     bd_ruta,
                     trabajo_id,
                     "error",
                     progreso,
                     registro,
-                    ERROR_ARRANQUE,
+                    plan.mensajes.arranque,
                 )
                 return
             en_curso.proceso = proceso
 
         temporizador = threading.Timer(
-            TIEMPO_MAXIMO_RENDER if tiempo_maximo is None else tiempo_maximo,
+            plan.tiempo_maximo,
             _vencer_tiempo,
             args=(en_curso, trabajo_id),
         )
@@ -345,6 +461,7 @@ def _ejecutar(
                         pendiente,
                         registro,
                         progreso,
+                        patron_progreso=plan.patron_progreso,
                         reescribir=reescribir_pendiente,
                     )
                     pendiente = ""
@@ -354,6 +471,7 @@ def _ejecutar(
                         pendiente,
                         registro,
                         progreso,
+                        patron_progreso=plan.patron_progreso,
                         reescribir=reescribir_pendiente,
                     )
                     pendiente = ""
@@ -384,6 +502,7 @@ def _ejecutar(
                 pendiente,
                 registro,
                 progreso,
+                patron_progreso=plan.patron_progreso,
                 reescribir=reescribir_pendiente,
             )
         codigo = proceso.wait()
@@ -395,51 +514,72 @@ def _ejecutar(
 
         if motivo == "apagado":
             # El apagado ya ha marcado el trabajo como interrumpido.
-            _borrar_temporal_sin_fallar(temporal, trabajo_id)
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             return
         if motivo == "tiempo":
             # Se espera a que el grupo muera antes de borrar lo que escribía.
             temporizador.join()
-            _borrar_temporal_sin_fallar(temporal, trabajo_id)
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
                 progreso,
                 registro,
-                ERROR_TIEMPO,
+                plan.mensajes.tiempo,
+            )
+            return
+        if motivo == "cancelado":
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
+            _finalizar_con_reintento(
+                bd_ruta,
+                trabajo_id,
+                "cancelado",
+                progreso,
+                registro,
+                ERROR_CANCELADO,
             )
             return
         if codigo != 0:
-            _borrar_temporal(temporal)
+            _borrar_temporal(plan.temporal)
             _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
                 progreso,
                 registro,
-                f"Remotion terminó con el código {codigo}",
+                plan.mensajes.codigo.format(codigo=codigo),
             )
             return
 
-        if temporal is not None and destino is not None:
-            try:
-                os.replace(temporal, destino)
-            except OSError:
-                logger.exception(
-                    "No se pudo instalar la vista previa del trabajo %s",
-                    trabajo_id,
-                )
-                _borrar_temporal_sin_fallar(temporal, trabajo_id)
-                _finalizar_con_reintento(
-                    bd_ruta,
-                    trabajo_id,
-                    "error",
-                    progreso,
-                    registro,
-                    ERROR_GUARDADO,
-                )
-                return
+        try:
+            _instalar_resultado(plan)
+        except FileExistsError:
+            logger.warning("El destino del trabajo %s ya existe", trabajo_id)
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
+            _finalizar_con_reintento(
+                bd_ruta,
+                trabajo_id,
+                "error",
+                progreso,
+                registro,
+                ERROR_SIN_PISAR,
+            )
+            return
+        except OSError:
+            logger.exception(
+                "No se pudo instalar el resultado del trabajo %s", trabajo_id
+            )
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
+            _finalizar_con_reintento(
+                bd_ruta,
+                trabajo_id,
+                "error",
+                progreso,
+                registro,
+                plan.mensajes.guardado,
+            )
+            return
         _finalizar_con_reintento(
             bd_ruta,
             trabajo_id,
@@ -453,7 +593,7 @@ def _ejecutar(
         if proceso is not None and proceso.poll() is None:
             _terminar_grupo(proceso)
             proceso.wait()
-        _borrar_temporal_sin_fallar(temporal, trabajo_id)
+        _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
         with en_curso.cerrojo:
             apagado = en_curso.motivo == "apagado"
             en_curso.motivo = en_curso.motivo or "fin"
@@ -464,7 +604,7 @@ def _ejecutar(
                 "error",
                 progreso,
                 registro,
-                ERROR_GUARDADO,
+                plan.mensajes.guardado,
             )
     finally:
         if temporizador is not None:
@@ -474,22 +614,10 @@ def _ejecutar(
 def _ejecutar_y_olvidar(
     bd_ruta: Path,
     trabajo_id: int,
-    comando: list[str],
-    cwd: Path,
-    temporal: Path | None,
-    destino: Path | None,
-    tiempo_maximo: float | None = None,
+    plan: PlanTrabajo,
 ) -> None:
     try:
-        _ejecutar(
-            bd_ruta,
-            trabajo_id,
-            comando,
-            cwd,
-            temporal,
-            destino,
-            tiempo_maximo,
-        )
+        _ejecutar(bd_ruta, trabajo_id, plan)
     finally:
         with _BLOQUEO:
             _HILOS.pop(trabajo_id, None)
@@ -498,15 +626,9 @@ def _ejecutar_y_olvidar(
 
 def lanzar(
     bd_ruta: Path,
-    accion: str,
     curso: str | None,
     numero: int | None,
-    comando: list[str],
-    cwd: Path,
-    temporal: Path | None,
-    destino: Path | None,
-    *,
-    tiempo_maximo: float | None = None,
+    plan: PlanTrabajo,
 ) -> Trabajo:
     reciclados: list[tuple[int, str | None]] = []
     with _BLOQUEO, closing(abrir_bd(bd_ruta)) as bd:
@@ -526,24 +648,25 @@ def lanzar(
                 bd.executemany(
                     """
                     UPDATE trabajo
-                    SET estado = 'interrumpido', fin = ?
+                    SET estado = 'interrumpido', fin = ?, error = ?
                     WHERE id = ? AND estado = 'en_marcha'
                     """,
-                    [(_ahora(), fila[0]) for fila in en_marcha],
+                    [(_ahora(), ERROR_INTERRUMPIDO, fila[0]) for fila in en_marcha],
                 )
                 reciclados = [(fila[0], fila[1]) for fila in en_marcha]
             cursor = bd.execute(
                 """
                 INSERT INTO trabajo
-                    (accion, curso, numero, estado, inicio, temporal)
-                VALUES (?, ?, ?, 'en_marcha', ?, ?)
+                    (accion, curso, numero, objetivo, estado, inicio, temporal)
+                VALUES (?, ?, ?, ?, 'en_marcha', ?, ?)
                 """,
                 (
-                    accion,
+                    plan.accion,
                     curso,
                     numero,
+                    plan.objetivo,
                     _ahora(),
-                    str(temporal) if temporal is not None else None,
+                    str(plan.temporal) if plan.temporal is not None else None,
                 ),
             )
             trabajo_id = cursor.lastrowid
@@ -564,39 +687,68 @@ def lanzar(
         assert trabajo is not None
         hilo = threading.Thread(
             target=_ejecutar_y_olvidar,
-            args=(
-                bd_ruta,
-                trabajo_id,
-                list(comando),
-                cwd,
-                temporal,
-                destino,
-                tiempo_maximo,
-            ),
+            args=(bd_ruta, trabajo_id, plan),
             daemon=True,
             name=f"trabajo-{trabajo_id}",
         )
         _HILOS[trabajo_id] = hilo
-        _EN_CURSO[trabajo_id] = _EnCurso(bd_ruta=bd_ruta, temporal=temporal)
+        _EN_CURSO[trabajo_id] = _EnCurso(
+            bd_ruta=bd_ruta,
+            temporal=plan.temporal,
+        )
         try:
             hilo.start()
         except Exception:
             logger.exception("No se pudo iniciar el hilo del trabajo %s", trabajo_id)
             _HILOS.pop(trabajo_id, None)
             _EN_CURSO.pop(trabajo_id, None)
-            _borrar_temporal_sin_fallar(temporal, trabajo_id)
+            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
             _finalizar_con_reintento(
                 bd_ruta,
                 trabajo_id,
                 "error",
                 0.0,
                 [],
-                ERROR_ARRANQUE,
+                plan.mensajes.arranque,
             )
             fallido = leer_trabajo(bd, trabajo_id)
             assert fallido is not None
             return fallido
         return trabajo
+
+
+def cancelar(bd_ruta: Path, id: int) -> Trabajo | None:
+    with _BLOQUEO:
+        en_curso = _EN_CURSO.get(id)
+        hilo = _HILOS.get(id)
+    if (
+        en_curso is None
+        or hilo is None
+        or en_curso.bd_ruta != bd_ruta
+        or not hilo.is_alive()
+    ):
+        return None
+
+    with en_curso.cerrojo:
+        if en_curso.motivo is None:
+            en_curso.motivo = "cancelado"
+        elif en_curso.motivo != "cancelado":
+            return None
+        proceso = en_curso.proceso
+
+    limite = monotonic() + 15
+    if proceso is not None:
+        try:
+            _terminar_grupo(proceso)
+        except Exception:
+            logger.exception("No se pudo cancelar el trabajo %s", id)
+    hilo.join(max(0.0, limite - monotonic()))
+
+    with closing(abrir_bd(bd_ruta)) as bd:
+        trabajo = leer_trabajo(bd, id)
+    if trabajo is not None and trabajo.estado == "cancelado":
+        return trabajo
+    return None
 
 
 def interrumpir_huerfanos(bd: sqlite3.Connection) -> int:
