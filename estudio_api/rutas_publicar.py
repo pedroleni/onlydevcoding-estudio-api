@@ -101,6 +101,139 @@ def _regenerar_desde_vista(
     )
 
 
+def _destinos_cambio_textos(
+    config: Config,
+    carpeta: RutaArchivo,
+    numero: int,
+) -> tuple[RutaArchivo, RutaArchivo]:
+    publicar = _raiz_publicar(config, carpeta)
+    if publicar is None:
+        raise HTTPException(
+            status_code=409,
+            detail="La carpeta publicar no es válida",
+        )
+    if not publicar.is_dir():
+        raise HTTPException(
+            status_code=409,
+            detail="La lección no tiene carpeta publicar",
+        )
+    ruta_json = ruta_escritura_segura(publicar, "publicacion.json")
+    if ruta_json is None or rutas_regeneracion(config, carpeta, numero) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Los destinos de publicación no son válidos",
+        )
+    return publicar, ruta_json
+
+
+def _publicacion_para_cambio(config: Config, carpeta: RutaArchivo) -> Publicacion:
+    lectura = leer_publicacion(config, carpeta, filtrar=False)
+    if lectura.error is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Arregla publicacion.json antes de editar desde la app",
+        )
+    return lectura.publicacion or Publicacion(version=1, piezas={})
+
+
+def _pieza_existe_para_cambio(
+    config: Config,
+    curso: str,
+    numero: int,
+    pieza: str,
+    publicacion: Publicacion,
+) -> bool:
+    leccion = leer_leccion(config, curso, numero)
+    if leccion is None:
+        return False
+    piezas_existentes = {elemento.id for elemento in leccion.piezas}
+    piezas_existentes.update(publicacion.piezas)
+    return pieza in piezas_existentes
+
+
+def _aplicar_cambio_textos(
+    publicacion: Publicacion,
+    pieza: str,
+    red: Red,
+    textos: TextosRedEditables,
+) -> Publicacion:
+    actualizada = publicacion.model_copy(deep=True)
+    pieza_publicacion = actualizada.piezas.setdefault(pieza, PiezaPublicacion())
+    textos_anteriores = pieza_publicacion.redes.get(red)
+    nuevos_textos = TextosRed.model_validate(
+        {
+            **textos.model_dump(mode="json"),
+            "video": textos_anteriores.video if textos_anteriores is not None else None,
+        }
+    )
+    if textos_red_vacios(nuevos_textos):
+        pieza_publicacion.redes.pop(red, None)
+    else:
+        pieza_publicacion.redes[red] = nuevos_textos
+    if not pieza_publicacion.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    ):
+        actualizada.piezas.pop(pieza, None)
+    actualizada.piezas = dict(
+        sorted(actualizada.piezas.items(), key=lambda item: clave_pieza(item[0]))
+    )
+    return actualizada
+
+
+def _contenido_publicacion(publicacion: Publicacion) -> str:
+    return (
+        json.dumps(
+            publicacion.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude_defaults=True,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _guardar_publicacion(
+    publicar: RutaArchivo,
+    ruta_json: RutaArchivo,
+    contenido: str,
+) -> None:
+    if len(contenido.encode("utf-8")) > MAX_TAMANO_JSON:
+        raise HTTPException(
+            status_code=422,
+            detail="publicacion.json supera el tamaño máximo permitido",
+        )
+    if ruta_escritura_segura(publicar, "publicacion.json") != ruta_json:
+        raise HTTPException(
+            status_code=409,
+            detail="El destino de publicacion.json no es válido",
+        )
+    escribir_atomico(ruta_json, contenido)
+
+
+def _resultado_cambio_textos(
+    config: Config,
+    curso: str,
+    numero: int,
+    carpeta: RutaArchivo,
+    publicacion: Publicacion,
+) -> VistaPublicacion:
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        resultado = construir_vista_publicacion(config, curso, numero, bd)
+    assert resultado is not None
+    resultado.aviso = _regenerar_desde_vista(
+        config,
+        curso,
+        numero,
+        carpeta,
+        publicacion,
+        resultado,
+    )
+    return resultado
+
+
 @router.get(
     "/cursos/{curso}/lecciones/{numero}/publicacion",
     response_model=VistaPublicacion,
@@ -209,7 +342,7 @@ def cambiar_estado(
     "/cursos/{curso}/lecciones/{numero}/publicacion/piezas/{pieza}/redes/{red}/textos",
     response_model=VistaPublicacion,
 )
-def cambiar_textos(  # noqa: C901, PLR0912 - deuda congelada
+def cambiar_textos(
     request: Request,
     textos: TextosRedEditables,
     curso: CursoId,
@@ -228,95 +361,24 @@ def cambiar_textos(  # noqa: C901, PLR0912 - deuda congelada
     if carpeta is None:
         return Response(status_code=404)
     with _BLOQUEO_CAMBIO_TEXTOS:
-        publicar = _raiz_publicar(config, carpeta)
-        if publicar is None:
-            raise HTTPException(
-                status_code=409,
-                detail="La carpeta publicar no es válida",
-            )
-        if not publicar.is_dir():
-            raise HTTPException(
-                status_code=409,
-                detail="La lección no tiene carpeta publicar",
-            )
-        ruta_json = ruta_escritura_segura(publicar, "publicacion.json")
-        if ruta_json is None or rutas_regeneracion(config, carpeta, numero) is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Los destinos de publicación no son válidos",
-            )
-
-        lectura = leer_publicacion(config, carpeta, filtrar=False)
-        if lectura.error is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="Arregla publicacion.json antes de editar desde la app",
-            )
-
-        publicacion = lectura.publicacion or Publicacion(version=1, piezas={})
-        leccion = leer_leccion(config, curso, numero)
-        if leccion is None:
-            return Response(status_code=404)
-        piezas_existentes = {elemento.id for elemento in leccion.piezas}
-        piezas_existentes.update(publicacion.piezas)
-        if pieza not in piezas_existentes:
-            return Response(status_code=404)
-
-        publicacion = publicacion.model_copy(deep=True)
-        pieza_publicacion = publicacion.piezas.setdefault(pieza, PiezaPublicacion())
-        textos_anteriores = pieza_publicacion.redes.get(red)
-        nuevos_textos = TextosRed.model_validate(
-            {
-                **textos.model_dump(mode="json"),
-                "video": (
-                    textos_anteriores.video if textos_anteriores is not None else None
-                ),
-            }
-        )
-        if textos_red_vacios(nuevos_textos):
-            pieza_publicacion.redes.pop(red, None)
-        else:
-            pieza_publicacion.redes[red] = nuevos_textos
-        if not pieza_publicacion.model_dump(
-            mode="json", exclude_none=True, exclude_defaults=True
+        publicar, ruta_json = _destinos_cambio_textos(config, carpeta, numero)
+        publicacion = _publicacion_para_cambio(config, carpeta)
+        if not _pieza_existe_para_cambio(
+            config,
+            curso,
+            numero,
+            pieza,
+            publicacion,
         ):
-            publicacion.piezas.pop(pieza, None)
-        publicacion.piezas = dict(
-            sorted(publicacion.piezas.items(), key=lambda item: clave_pieza(item[0]))
-        )
-        contenido = (
-            json.dumps(
-                publicacion.model_dump(
-                    mode="json",
-                    exclude_none=True,
-                    exclude_defaults=True,
-                ),
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n"
-        )
-        if len(contenido.encode("utf-8")) > MAX_TAMANO_JSON:
-            raise HTTPException(
-                status_code=422,
-                detail="publicacion.json supera el tamaño máximo permitido",
-            )
-        if ruta_escritura_segura(publicar, "publicacion.json") != ruta_json:
-            raise HTTPException(
-                status_code=409,
-                detail="El destino de publicacion.json no es válido",
-            )
-        escribir_atomico(ruta_json, contenido)
+            return Response(status_code=404)
 
-        with closing(abrir_bd(config.bd_ruta)) as bd:
-            resultado = construir_vista_publicacion(config, curso, numero, bd)
-        assert resultado is not None
-        resultado.aviso = _regenerar_desde_vista(
+        publicacion = _aplicar_cambio_textos(publicacion, pieza, red, textos)
+        contenido = _contenido_publicacion(publicacion)
+        _guardar_publicacion(publicar, ruta_json, contenido)
+        return _resultado_cambio_textos(
             config,
             curso,
             numero,
             carpeta,
             publicacion,
-            resultado,
         )
-        return resultado
