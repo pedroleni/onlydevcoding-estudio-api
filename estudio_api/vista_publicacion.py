@@ -1,4 +1,6 @@
 import sqlite3
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -52,6 +54,14 @@ class VistaPublicacion(BaseModel):
     aviso: str | None = None
 
 
+@dataclass(frozen=True)
+class _ContextoPieza:
+    config: Config
+    carpeta: Path | None
+    elegidas: Mapping[str, str]
+    estados_guardados: Mapping[tuple[str, str], EstadoRed]
+
+
 def _tipo_pieza(identificador: str) -> TipoPieza:
     if identificador == "leccion":
         return "leccion"
@@ -84,24 +94,25 @@ def _textos_vista(
     )
 
 
-def _construir_pieza(  # noqa: PLR0913 - deuda congelada
-    config: Config,
-    carpeta: Path | None,
+def _construir_pieza(
+    contexto: _ContextoPieza,
     identificador: str,
     disco: Pieza | None,
     datos: PiezaPublicacion | None,
-    elegidas: dict[str, str],
-    estados_guardados: dict[tuple[str, str], EstadoRed],
 ) -> PiezaVista:
     portadas = portadas_candidatas(
-        config,
-        carpeta,
+        contexto.config,
+        contexto.carpeta,
         list(disco.portadas) if disco is not None else [],
         datos,
     )
-    elegida = elegidas.get(identificador)
+    elegida = contexto.elegidas.get(identificador)
 
-    video_json = _ruta_json(config, carpeta, datos.video if datos else None)
+    video_json = _ruta_json(
+        contexto.config,
+        contexto.carpeta,
+        datos.video if datos else None,
+    )
     if datos is not None and datos.titulo and datos.titulo.strip():
         titulo = datos.titulo
     elif disco is not None:
@@ -112,8 +123,8 @@ def _construir_pieza(  # noqa: PLR0913 - deuda congelada
     redes = [
         RedVista(
             red=red,
-            textos=_textos_vista(config, carpeta, datos, red),
-            estado=estados_guardados.get(
+            textos=_textos_vista(contexto.config, contexto.carpeta, datos, red),
+            estado=contexto.estados_guardados.get(
                 (identificador, red),
                 EstadoRed(estado="pendiente"),
             ),
@@ -151,19 +162,17 @@ def construir_vista_publicacion(
     identificadores = sorted(set(piezas_disco) | set(piezas_json), key=clave_pieza)
     elegidas = portadas_elegidas(bd, curso, numero)
     estados_guardados = estados(bd, curso, numero)
+    contexto_pieza = _ContextoPieza(config, carpeta, elegidas, estados_guardados)
 
     return VistaPublicacion(
         curso=curso,
         numero=numero,
         piezas=[
             _construir_pieza(
-                config,
-                carpeta,
+                contexto_pieza,
                 identificador,
                 piezas_disco.get(identificador),
                 piezas_json.get(identificador),
-                elegidas,
-                estados_guardados,
             )
             for identificador in identificadores
         ],

@@ -52,7 +52,32 @@ def _resolver_ruta(config: Config, ruta_publica: str) -> Path | None:
     return ruta
 
 
-def _rango_solicitado(  # noqa: PLR0911 - deuda congelada
+def _rango_de_sufijo(fin_texto: str, tamano: int) -> tuple[int, int] | object:
+    longitud = int(fin_texto)
+    if longitud <= 0:
+        return RANGO_NO_SATISFACIBLE
+    inicio = max(tamano - longitud, 0)
+    return inicio, tamano - 1
+
+
+def _rango_desde_inicio(
+    inicio_texto: str,
+    fin_texto: str,
+    tamano: int,
+) -> tuple[int, int] | object:
+    inicio = int(inicio_texto)
+    if inicio >= tamano:
+        return RANGO_NO_SATISFACIBLE
+    if not fin_texto:
+        return inicio, tamano - 1
+
+    fin = int(fin_texto)
+    if fin < inicio:
+        return RANGO_NO_SATISFACIBLE
+    return inicio, min(fin, tamano - 1)
+
+
+def _rango_solicitado(
     cabecera: str,
     tamano: int,
 ) -> tuple[int, int] | object | None:
@@ -69,22 +94,8 @@ def _rango_solicitado(  # noqa: PLR0911 - deuda congelada
         return RANGO_NO_SATISFACIBLE
 
     if not inicio_texto:
-        longitud = int(fin_texto)
-        if longitud <= 0:
-            return RANGO_NO_SATISFACIBLE
-        inicio = max(tamano - longitud, 0)
-        return inicio, tamano - 1
-
-    inicio = int(inicio_texto)
-    if inicio >= tamano:
-        return RANGO_NO_SATISFACIBLE
-    if not fin_texto:
-        return inicio, tamano - 1
-
-    fin = int(fin_texto)
-    if fin < inicio:
-        return RANGO_NO_SATISFACIBLE
-    return inicio, min(fin, tamano - 1)
+        return _rango_de_sufijo(fin_texto, tamano)
+    return _rango_desde_inicio(inicio_texto, fin_texto, tamano)
 
 
 def _leer_trozo(ruta: Path, inicio: int, longitud: int) -> Iterator[bytes]:

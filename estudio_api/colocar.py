@@ -79,6 +79,15 @@ class _PlanToma:
     texto_vertical: str | None
 
 
+@dataclass(frozen=True)
+class _ContextoPropuesta:
+    config: Config
+    curso: str
+    numero: int
+    datos: Any
+    carpeta: Path
+
+
 def id_toma_vertical(archivo: str) -> str:
     if archivo.startswith("Facetune") and len(archivo) >= 16:
         candidato = archivo[8:16]
@@ -529,19 +538,20 @@ def _salidas_del_plan(
     ]
 
 
-def _actualizar_propuesta(  # noqa: PLR0913 - deuda congelada
-    config: Config,
-    curso: str,
-    numero: int,
-    datos: Any,
-    carpeta: Path,
+def _actualizar_propuesta(
+    contexto: _ContextoPropuesta,
     propuesta: Propuesta,
     planes: list[_PlanToma],
 ) -> None:
     colocados = {plan.toma.archivo for plan in planes}
     restantes = [toma for toma in propuesta.archivos if toma.archivo not in colocados]
-    quedan_videos = listar_entregas(config, curso, numero, datos=datos)
-    ruta_propuesta = carpeta / "propuesta.json"
+    quedan_videos = listar_entregas(
+        contexto.config,
+        contexto.curso,
+        contexto.numero,
+        datos=contexto.datos,
+    )
+    ruta_propuesta = contexto.carpeta / "propuesta.json"
     if not quedan_videos:
         ruta_propuesta.unlink(missing_ok=True)
         return
@@ -703,7 +713,11 @@ def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
         except OSError, ValueError:
             logger.warning("No se pudo limpiar el análisis de una toma", exc_info=True)
     try:
-        _actualizar_propuesta(config, curso, numero, datos, carpeta, propuesta, planes)
+        _actualizar_propuesta(
+            _ContextoPropuesta(config, curso, numero, datos, carpeta),
+            propuesta,
+            planes,
+        )
     except OSError, ValueError:
         logger.warning("No se pudo actualizar la propuesta", exc_info=True)
 

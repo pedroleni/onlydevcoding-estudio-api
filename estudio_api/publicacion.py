@@ -297,7 +297,20 @@ def _filtrar_medios(publicar: Path, publicacion: Publicacion) -> None:
                 textos.video = None
 
 
-def leer_publicacion(  # noqa: PLR0911 - deuda congelada
+def _publicacion_desde_ruta(ruta: Path) -> Publicacion | None:
+    datos = _leer_json(ruta)
+    if datos is None:
+        return None
+    try:
+        publicacion = Publicacion.model_validate(datos)
+    except RecursionError, ValidationError, ValueError:
+        return None
+    if not _texto_codificable_en_utf8(publicacion.model_dump(mode="json")):
+        return None
+    return publicacion
+
+
+def leer_publicacion(
     config: Config,
     carpeta: Path | None,
     *,
@@ -316,14 +329,8 @@ def leer_publicacion(  # noqa: PLR0911 - deuda congelada
     if not ruta.is_file():
         return LecturaPublicacion()
 
-    datos = _leer_json(ruta)
-    if datos is None:
-        return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
-    try:
-        publicacion = Publicacion.model_validate(datos)
-    except RecursionError, ValidationError, ValueError:
-        return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
-    if not _texto_codificable_en_utf8(publicacion.model_dump(mode="json")):
+    publicacion = _publicacion_desde_ruta(ruta)
+    if publicacion is None:
         return LecturaPublicacion(publicacion=None, error=ERROR_LECTURA)
 
     if filtrar:

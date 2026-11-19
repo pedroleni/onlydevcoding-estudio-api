@@ -518,7 +518,44 @@ def _quitar_de_propuesta(descriptor_carpeta: int, archivo: str) -> None:
     _escribir_propuesta_cruda(descriptor_carpeta, {**datos, "archivos": restantes})
 
 
-def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:  # noqa: PLR0912 - deuda congelada
+def _nombre_entrega_regular(descriptor: int, archivo: str) -> str | None:
+    with os.scandir(descriptor) as entradas:
+        for entrada in entradas:
+            if entrada.name != archivo:
+                continue
+            datos = entrada.stat(follow_symlinks=False)
+            return entrada.name if stat.S_ISREG(datos.st_mode) else None
+    return None
+
+
+def _carpeta_analisis_o_none(carpeta: Path) -> Path | None:
+    analisis = _ruta_literal_segura(carpeta, ".analisis")
+    datos_analisis = _lstat_o_none(analisis)
+    if datos_analisis is None:
+        return None
+    if not stat.S_ISDIR(datos_analisis.st_mode):
+        raise OSError("La carpeta de análisis no es un directorio real")
+    return analisis
+
+
+def _borrar_analisis(analisis: Path, nombre_real: str) -> None:
+    descriptor = os.open(analisis, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    try:
+        # Solo los tres nombres exactos: ``a.mov`` no toca ``a.mov.mov.*``.
+        for extension in EXTENSIONES_ANALISIS:
+            nombre = f"{nombre_real}.{extension}"
+            try:
+                datos = os.stat(nombre, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(datos.st_mode):
+                os.unlink(nombre, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:
     if PATRON_ARCHIVO_ENTREGA.fullmatch(archivo) is None:
         raise NombreEntregaInvalido
     carpeta = carpeta_entregas(config, curso, numero)
@@ -527,46 +564,17 @@ def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> boo
     _exigir_directorio_real(carpeta)
     descriptor = os.open(carpeta, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
-        nombre_real: str | None = None
-        with os.scandir(descriptor) as entradas:
-            for entrada in entradas:
-                if entrada.name != archivo:
-                    continue
-                datos = entrada.stat(follow_symlinks=False)
-                if stat.S_ISREG(datos.st_mode):
-                    nombre_real = entrada.name
-                break
+        nombre_real = _nombre_entrega_regular(descriptor, archivo)
         if nombre_real is None:
             return False
 
-        analisis = _ruta_literal_segura(carpeta, ".analisis")
-        datos_analisis = _lstat_o_none(analisis)
-        if datos_analisis is not None and not stat.S_ISDIR(datos_analisis.st_mode):
-            raise OSError("La carpeta de análisis no es un directorio real")
+        analisis = _carpeta_analisis_o_none(carpeta)
 
         # Primero la propuesta: si falla, no se ha borrado nada.
         _quitar_de_propuesta(descriptor, nombre_real)
 
-        if datos_analisis is not None:
-            descriptor_analisis = os.open(
-                analisis,
-                os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
-            )
-            try:
-                # Solo los tres nombres exactos: ``a.mov`` no toca ``a.mov.mov.*``.
-                for extension in EXTENSIONES_ANALISIS:
-                    nombre = f"{nombre_real}.{extension}"
-                    try:
-                        datos = os.stat(
-                            nombre, dir_fd=descriptor_analisis, follow_symlinks=False
-                        )
-                    except FileNotFoundError:
-                        continue
-                    if stat.S_ISREG(datos.st_mode):
-                        os.unlink(nombre, dir_fd=descriptor_analisis)
-                os.fsync(descriptor_analisis)
-            finally:
-                os.close(descriptor_analisis)
+        if analisis is not None:
+            _borrar_analisis(analisis, nombre_real)
 
         os.unlink(nombre_real, dir_fd=descriptor)
         os.fsync(descriptor)
