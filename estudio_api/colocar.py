@@ -17,7 +17,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from estudio_api.config import Config
-from estudio_api.entregas import carpeta_entregas, listar_entregas
+from estudio_api.entregas import (
+    ArchivoEntregado,
+    carpeta_entregas,
+    listar_entregas,
+)
 from estudio_api.guion_textos import (
     ConflictoEscrituraGuion,
     cerrojo_escritura_guion,
@@ -565,22 +569,17 @@ def _actualizar_propuesta(
     )
 
 
-def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
-    config: Config,
-    bd: sqlite3.Connection,
-    curso: str,
-    numero: int,
-    asignaciones: list[Asignacion],
-    pila: ExitStack,
-) -> ResultadoColocar:
-    datos = datos_curso(config, curso)
-    carpeta = carpeta_entregas(config, curso, numero, datos=datos)
-    if carpeta is None:
-        raise ColocacionNoValida(404, "La lección no existe")
-    entregadas = listar_entregas(config, curso, numero, datos=datos)
-    propuesta = leer_propuesta(config, curso, numero, datos=datos)
-    if entregadas is None or propuesta is None:
-        raise ColocacionNoValida(409, "Identifica las tomas antes de colocarlas")
+@dataclass(frozen=True)
+class _JsonPorEscribir:
+    """Un JSON que reescribe la colocación, con lo leído al comprobar su versión."""
+
+    ruta: Path
+    datos: dict[str, Any]
+    version: str | None
+    original: bytes | None
+
+
+def _ocupar_hueco_de_trabajos(bd: sqlite3.Connection, pila: ExitStack) -> None:
     try:
         # Desde aquí y hasta terminar, ningún trabajo puede arrancar.
         pila.enter_context(ocupar_sin_trabajo())
@@ -588,17 +587,16 @@ def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
         raise ColocacionNoValida(409, "Ya hay un trabajo en marcha") from error
     if _hay_trabajo_en_marcha(bd):
         raise ColocacionNoValida(409, "Ya hay un trabajo en marcha")
-    datos_guion = datos[2].get(numero) if datos is not None else None
-    if datos_guion is None:
-        raise ColocacionNoValida(409, "Identifica las tomas antes de colocarlas")
-    guion = datos_guion[2]
-    ruta_guion = datos_guion[3]
-    version_guion = hashlib.sha256(datos_guion[4]).hexdigest()
-    planes = _prevalidar(propuesta, guion, asignaciones)
 
-    # Validación previa: nada se toca si algo falla.
-    grabaciones = carpeta.parent
-    videos = _ruta_literal(grabaciones, "videos")
+
+def _validar_salidas(
+    contexto: _ContextoPropuesta,
+    nombre_guion: str,
+    videos: Path,
+    entregadas: list[ArchivoEntregado],
+    planes: list[_PlanToma],
+) -> list[_Salida]:
+    """Comprueba cada toma y sus destinos sin tocar nada; devuelve las copias."""
     _exigir_directorio_o_ausente(videos)
     propuestas_en_disco = {entrega.archivo for entrega in entregadas}
     salidas: list[_Salida] = []
@@ -606,10 +604,12 @@ def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
     for plan in planes:
         if plan.toma.archivo not in propuestas_en_disco:
             raise ColocacionNoValida(422, "Esa toma no está entregada")
-        _exigir_archivo_regular(carpeta / plan.toma.archivo)
+        _exigir_archivo_regular(contexto.carpeta / plan.toma.archivo)
         if os.path.lexists(videos / plan.toma.archivo):
             raise ColocacionNoValida(409, "Ya hay una toma con ese nombre")
-        for salida in _salidas_del_plan(config, carpeta, propuesta.guion, numero, plan):
+        for salida in _salidas_del_plan(
+            contexto.config, contexto.carpeta, nombre_guion, contexto.numero, plan
+        ):
             if salida.destino in destinos_vistos:
                 raise ColocacionNoValida(422, "Hay dos tomas para el mismo destino")
             destinos_vistos.add(salida.destino)
@@ -617,20 +617,19 @@ def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
     for salida in salidas:
         _exigir_directorio_o_ausente(salida.destino.parent)
         _exigir_destino_regular_o_ausente(salida.destino)
+    return salidas
 
-    hay_verticales = any(plan.candidato is None for plan in planes)
-    ruta_shorts = _ruta_literal(
-        config.estudio_dir,
-        "shorts",
-        f"l{numero}",
-        "shorts.json",
-    )
-    shorts: dict[str, Any] | None = None
-    version_shorts: str | None = None
-    if hay_verticales:
-        _exigir_destino_regular_o_ausente(ruta_shorts)
-        shorts, version_shorts = _leer_shorts(ruta_shorts, propuesta.guion, numero)
 
+def _anotar_tomas(
+    guion: dict[str, Any],
+    nombre_guion: str,
+    planes: list[_PlanToma],
+    shorts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Devuelve una copia del guion con las tomas de cámara.
+
+    Las verticales se apuntan en ``shorts`` (en memoria; nada se escribe aquí).
+    """
     guion_actualizado = copy.deepcopy(guion)
     escenas, _ = destinos_guion(guion_actualizado)
     for plan in planes:
@@ -653,73 +652,168 @@ def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
         duracion = plan.toma.duracion
         escenas[plan.destino]["toma"] = {
             "original": f"grabaciones/videos/{plan.toma.archivo}",
-            "video": f"grabaciones/{propuesta.guion}/{plan.destino}.mov",
+            "video": f"grabaciones/{nombre_guion}/{plan.destino}.mov",
             # La herramienta redondea a 2 decimales: nunca más allá del vídeo.
             "desde": min(candidato.desde, duracion),
             "hasta": min(candidato.hasta, duracion),
             "cues": [min(cue, duracion) for cue in candidato.cues or []],
         }
+    return guion_actualizado
 
-    version_actual_guion, original_guion = version_json(ruta_guion)
-    if version_actual_guion != version_guion:
+
+def _original_sin_cambios(ruta: Path, version: str | None) -> bytes | None:
+    """Lee el JSON justo antes de escribir; si ha cambiado desde fuera, conflicto."""
+    version_actual, original = version_json(ruta)
+    if version_actual != version:
         raise ConflictoEscrituraGuion
-    original_shorts: bytes | None = None
-    if hay_verticales:
-        version_actual_shorts, original_shorts = version_json(ruta_shorts)
-        if version_actual_shorts != version_shorts:
-            raise ConflictoEscrituraGuion
+    return original
 
+
+def _preparar_colocacion(
+    contexto: _ContextoPropuesta,
+    videos: Path,
+    salidas: list[_Salida],
+    shorts: _JsonPorEscribir | None,
+    deshacer: _Deshacer,
+) -> None:
+    _crear_directorios_reales(videos, contexto.carpeta.parent, deshacer.directorios)
+    for salida in salidas:
+        _crear_directorios_reales(
+            salida.destino.parent, contexto.config.estudio_dir, deshacer.directorios
+        )
+    if shorts is not None:
+        _crear_directorios_reales(
+            shorts.ruta.parent, contexto.config.estudio_dir, deshacer.directorios
+        )
+    for salida in salidas:
+        _preparar_copia(salida, deshacer)
+
+
+def _mover_originales(
+    carpeta: Path, videos: Path, planes: list[_PlanToma], deshacer: _Deshacer
+) -> None:
+    for plan in planes:
+        origen = carpeta / plan.toma.archivo
+        destino_original = videos / plan.toma.archivo
+        if os.path.lexists(destino_original):
+            raise ColocacionNoValida(409, "Ya hay una toma con ese nombre")
+        os.rename(origen, destino_original)
+        deshacer.movidos.append((origen, destino_original))
+
+
+def _instalar_colocacion(
+    contexto: _ContextoPropuesta,
+    videos: Path,
+    planes: list[_PlanToma],
+    salidas: list[_Salida],
+    guion: _JsonPorEscribir,
+    shorts: _JsonPorEscribir | None,
+) -> None:
+    """Hace los cambios visibles; si algo falla, lo deshace todo en orden inverso."""
     deshacer = _Deshacer()
     try:
         # a) Preparación: carpetas y temporales ocultos, nada visible cambia.
-        _crear_directorios_reales(videos, grabaciones, deshacer.directorios)
-        for salida in salidas:
-            _crear_directorios_reales(
-                salida.destino.parent, config.estudio_dir, deshacer.directorios
-            )
-        if hay_verticales:
-            _crear_directorios_reales(
-                ruta_shorts.parent, config.estudio_dir, deshacer.directorios
-            )
-        for salida in salidas:
-            _preparar_copia(salida, deshacer)
+        _preparar_colocacion(contexto, videos, salidas, shorts, deshacer)
 
         # b) Instalación: originales, copias (archivando) y JSON.
-        for plan in planes:
-            origen = carpeta / plan.toma.archivo
-            destino_original = videos / plan.toma.archivo
-            if os.path.lexists(destino_original):
-                raise ColocacionNoValida(409, "Ya hay una toma con ese nombre")
-            os.rename(origen, destino_original)
-            deshacer.movidos.append((origen, destino_original))
+        _mover_originales(contexto.carpeta, videos, planes, deshacer)
         for salida in salidas:
             _instalar(salida, deshacer)
-        _escribir_json(
-            ruta_guion, guion_actualizado, version_guion, original_guion, deshacer
-        )
+        _escribir_json(guion.ruta, guion.datos, guion.version, guion.original, deshacer)
         if shorts is not None:
             _escribir_json(
-                ruta_shorts, shorts, version_shorts, original_shorts, deshacer
+                shorts.ruta, shorts.datos, shorts.version, shorts.original, deshacer
             )
     except BaseException:
         _deshacer(deshacer)
         raise
 
-    # c) Solo con todo instalado: análisis y propuesta. Si esto falla, las tomas
-    # ya están colocadas; lo que quede se ignora al leer la propuesta.
+
+def _limpiar_tras_colocar(
+    contexto: _ContextoPropuesta,
+    propuesta: Propuesta,
+    planes: list[_PlanToma],
+) -> None:
+    """c) Solo con todo instalado: análisis y propuesta.
+
+    Si esto falla, las tomas ya están colocadas; lo que quede se ignora al leer
+    la propuesta.
+    """
     for plan in planes:
         try:
-            _limpiar_analisis(carpeta, plan.toma.archivo)
+            _limpiar_analisis(contexto.carpeta, plan.toma.archivo)
         except OSError, ValueError:
             logger.warning("No se pudo limpiar el análisis de una toma", exc_info=True)
     try:
-        _actualizar_propuesta(
-            _ContextoPropuesta(config, curso, numero, datos, carpeta),
-            propuesta,
-            planes,
-        )
+        _actualizar_propuesta(contexto, propuesta, planes)
     except OSError, ValueError:
         logger.warning("No se pudo actualizar la propuesta", exc_info=True)
+
+
+def _colocar_tomas(
+    config: Config,
+    bd: sqlite3.Connection,
+    curso: str,
+    numero: int,
+    asignaciones: list[Asignacion],
+    pila: ExitStack,
+) -> ResultadoColocar:
+    datos = datos_curso(config, curso)
+    carpeta = carpeta_entregas(config, curso, numero, datos=datos)
+    if carpeta is None:
+        raise ColocacionNoValida(404, "La lección no existe")
+    entregadas = listar_entregas(config, curso, numero, datos=datos)
+    propuesta = leer_propuesta(config, curso, numero, datos=datos)
+    if entregadas is None or propuesta is None:
+        raise ColocacionNoValida(409, "Identifica las tomas antes de colocarlas")
+    _ocupar_hueco_de_trabajos(bd, pila)
+    datos_guion = datos[2].get(numero) if datos is not None else None
+    if datos_guion is None:
+        raise ColocacionNoValida(409, "Identifica las tomas antes de colocarlas")
+    guion = datos_guion[2]
+    ruta_guion = datos_guion[3]
+    version_guion = hashlib.sha256(datos_guion[4]).hexdigest()
+    planes = _prevalidar(propuesta, guion, asignaciones)
+
+    # Validación previa: nada se toca si algo falla.
+    contexto = _ContextoPropuesta(config, curso, numero, datos, carpeta)
+    videos = _ruta_literal(carpeta.parent, "videos")
+    salidas = _validar_salidas(contexto, propuesta.guion, videos, entregadas, planes)
+
+    hay_verticales = any(plan.candidato is None for plan in planes)
+    ruta_shorts = _ruta_literal(
+        config.estudio_dir,
+        "shorts",
+        f"l{numero}",
+        "shorts.json",
+    )
+    shorts: dict[str, Any] | None = None
+    version_shorts: str | None = None
+    if hay_verticales:
+        _exigir_destino_regular_o_ausente(ruta_shorts)
+        shorts, version_shorts = _leer_shorts(ruta_shorts, propuesta.guion, numero)
+
+    guion_actualizado = _anotar_tomas(guion, propuesta.guion, planes, shorts)
+
+    escritura_guion = _JsonPorEscribir(
+        ruta_guion,
+        guion_actualizado,
+        version_guion,
+        _original_sin_cambios(ruta_guion, version_guion),
+    )
+    escritura_shorts: _JsonPorEscribir | None = None
+    if shorts is not None:
+        escritura_shorts = _JsonPorEscribir(
+            ruta_shorts,
+            shorts,
+            version_shorts,
+            _original_sin_cambios(ruta_shorts, version_shorts),
+        )
+
+    _instalar_colocacion(
+        contexto, videos, planes, salidas, escritura_guion, escritura_shorts
+    )
+    _limpiar_tras_colocar(contexto, propuesta, planes)
 
     return ResultadoColocar(
         colocadas=[
