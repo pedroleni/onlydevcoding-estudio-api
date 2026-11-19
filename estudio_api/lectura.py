@@ -376,7 +376,34 @@ def leer_lecciones(
     return lecciones
 
 
-def _tiempos_montaje(  # noqa: C901 - deuda congelada
+def _tiempos_de_escenas(
+    valor_escenas: object,
+    fps: float,
+) -> tuple[dict[str, tuple[float, float]], float, bool]:
+    tiempos: dict[str, tuple[float, float]] = {}
+    acumulada_s = 0.0
+    linea_tiempo_valida = True
+    if not isinstance(valor_escenas, list):
+        return tiempos, acumulada_s, linea_tiempo_valida
+
+    for escena in valor_escenas:
+        if not isinstance(escena, dict):
+            continue
+        duracion_s = _duracion_en_segundos(escena.get("duracion"), fps)
+        if duracion_s is None:
+            linea_tiempo_valida = False
+            continue
+        identificador = escena.get("id")
+        if linea_tiempo_valida and isinstance(identificador, str):
+            tiempos[identificador] = (acumulada_s, duracion_s)
+        if linea_tiempo_valida:
+            acumulada_s += duracion_s
+            if not math.isfinite(acumulada_s) or acumulada_s > MAX_DURACION_SEGUNDOS:
+                linea_tiempo_valida = False
+    return tiempos, acumulada_s, linea_tiempo_valida
+
+
+def _tiempos_montaje(
     config: Config,
     identificador_guion: str,
 ) -> tuple[dict[str, tuple[float, float]], float | None]:
@@ -401,28 +428,8 @@ def _tiempos_montaje(  # noqa: C901 - deuda congelada
     if fps is None:
         return {}, None
 
-    tiempos: dict[str, tuple[float, float]] = {}
-    acumulada_s = 0.0
-    linea_tiempo_valida = True
     escenas = datos.get("escenas")
-    if isinstance(escenas, list):
-        for escena in escenas:
-            if not isinstance(escena, dict):
-                continue
-            duracion_s = _duracion_en_segundos(escena.get("duracion"), fps)
-            if duracion_s is None:
-                linea_tiempo_valida = False
-                continue
-            identificador = escena.get("id")
-            if linea_tiempo_valida and isinstance(identificador, str):
-                tiempos[identificador] = (acumulada_s, duracion_s)
-            if linea_tiempo_valida:
-                acumulada_s += duracion_s
-                if (
-                    not math.isfinite(acumulada_s)
-                    or acumulada_s > MAX_DURACION_SEGUNDOS
-                ):
-                    linea_tiempo_valida = False
+    tiempos, acumulada_s, linea_tiempo_valida = _tiempos_de_escenas(escenas, fps)
 
     if "duracion" in datos:
         return tiempos, _duracion_en_segundos(datos["duracion"], fps)
@@ -606,33 +613,12 @@ def _piezas(
     ]
 
 
-def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
+def _pieza_leccion_de_disco(
     config: Config,
-    carpeta: Path | None,
+    youtube: Path,
     titulo_leccion: str,
-) -> list[Pieza]:
+) -> Pieza:
     video_leccion: str | None = None
-    portadas_leccion: list[str] = []
-    if carpeta is None:
-        return [Pieza(id="leccion", tipo="leccion", titulo=titulo_leccion)]
-
-    relativa = carpeta.relative_to(config.cursos_dir.resolve())
-    try:
-        youtube = ruta_segura(
-            config.cursos_dir,
-            *relativa.parts,
-            "publicar",
-            "1-youtube-leccion",
-        )
-        verticales = ruta_segura(
-            config.cursos_dir,
-            *relativa.parts,
-            "publicar",
-            "2-shorts-y-reels",
-        )
-    except ValueError:
-        return [Pieza(id="leccion", tipo="leccion", titulo=titulo_leccion)]
-
     videos_leccion = _archivos_directos(
         config.cursos_dir,
         youtube,
@@ -657,18 +643,41 @@ def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
         opciones_miniatura = youtube
     if opciones_miniatura != youtube:
         miniaturas.extend(_imagenes_directas(config.cursos_dir, opciones_miniatura))
-    portadas_leccion = [
-        _ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in miniaturas
-    ]
-    piezas = [
-        Pieza(
-            id="leccion",
-            tipo="leccion",
-            titulo=titulo_leccion,
-            video=video_leccion,
-            portadas=portadas_leccion,
-        )
-    ]
+    return Pieza(
+        id="leccion",
+        tipo="leccion",
+        titulo=titulo_leccion,
+        video=video_leccion,
+        portadas=[
+            _ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in miniaturas
+        ],
+    )
+
+
+def _repartir_portadas_reels(
+    reels: list[Path],
+    portadas: list[Path],
+) -> dict[Path, list[Path]]:
+    portadas_por_reel: dict[Path, list[Path]] = {reel: [] for reel in reels}
+    if len(reels) == 1:
+        portadas_por_reel[reels[0]] = portadas
+    elif reels:
+        for portada in portadas:
+            nombre_portada = portada.stem[len("portada-") :]
+            reel = max(
+                reels,
+                key=lambda candidato: _longitud_prefijo_comun(
+                    nombre_portada, candidato.stem
+                ),
+            )
+            portadas_por_reel[reel].append(portada)
+    return portadas_por_reel
+
+
+def _piezas_reels_de_disco(
+    config: Config,
+    verticales: Path,
+) -> tuple[list[Pieza], Path]:
 
     reels = _archivos_directos(
         config.cursos_dir,
@@ -703,20 +712,9 @@ def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
                 lambda nombre: nombre.lower().startswith("portada-reel"),
             )
         )
-    portadas_por_reel: dict[Path, list[Path]] = {reel: [] for reel in reels}
-    if len(reels) == 1:
-        portadas_por_reel[reels[0]] = portadas_reels
-    elif reels:
-        for portada in portadas_reels:
-            nombre_portada = portada.stem[len("portada-") :]
-            reel = max(
-                reels,
-                key=lambda candidato: _longitud_prefijo_comun(
-                    nombre_portada, candidato.stem
-                ),
-            )
-            portadas_por_reel[reel].append(portada)
+    portadas_por_reel = _repartir_portadas_reels(reels, portadas_reels)
 
+    piezas: list[Pieza] = []
     for indice, ruta in enumerate(reels, start=1):
         piezas.append(
             Pieza(
@@ -730,7 +728,14 @@ def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
                 ],
             )
         )
+    return piezas, opciones_compartidas
 
+
+def _piezas_shorts_de_disco(
+    config: Config,
+    verticales: Path,
+    opciones_compartidas: Path,
+) -> list[Pieza]:
     shorts: list[tuple[int, Path]] = []
     for ruta in _archivos_directos(
         config.cursos_dir,
@@ -743,6 +748,7 @@ def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
         shorts.append((int(coincidencia.group(1)), ruta))
     shorts.sort(key=lambda elemento: (elemento[0], elemento[1].name))
 
+    piezas: list[Pieza] = []
     for numero, ruta in shorts:
         prefijo = f"portada-short-{numero}-"
         portadas = _imagenes_directas(
@@ -783,6 +789,44 @@ def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
             )
         )
     return piezas
+
+
+def _piezas_de_disco(
+    config: Config,
+    carpeta: Path | None,
+    titulo_leccion: str,
+) -> list[Pieza]:
+    if carpeta is None:
+        return [Pieza(id="leccion", tipo="leccion", titulo=titulo_leccion)]
+
+    relativa = carpeta.relative_to(config.cursos_dir.resolve())
+    try:
+        youtube = ruta_segura(
+            config.cursos_dir,
+            *relativa.parts,
+            "publicar",
+            "1-youtube-leccion",
+        )
+        verticales = ruta_segura(
+            config.cursos_dir,
+            *relativa.parts,
+            "publicar",
+            "2-shorts-y-reels",
+        )
+    except ValueError:
+        return [Pieza(id="leccion", tipo="leccion", titulo=titulo_leccion)]
+
+    pieza_leccion = _pieza_leccion_de_disco(config, youtube, titulo_leccion)
+    piezas_reels, opciones_compartidas = _piezas_reels_de_disco(
+        config,
+        verticales,
+    )
+    piezas_shorts = _piezas_shorts_de_disco(
+        config,
+        verticales,
+        opciones_compartidas,
+    )
+    return [pieza_leccion, *piezas_reels, *piezas_shorts]
 
 
 def _decisiones_publicacion(

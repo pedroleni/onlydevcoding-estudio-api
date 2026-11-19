@@ -249,10 +249,9 @@ def _fotogramas_no_negativos(
     return valor
 
 
-def _leer_montaje(  # noqa: C901, PLR0911, PLR0912 - deuda congelada
+def _datos_montaje_validos(
     ruta: Path | None,
-    guion: dict[str, Any],
-) -> Montaje | None:
+) -> tuple[float, int, list[Any]] | None:
     if ruta is None:
         return None
     datos = _leer_json(ruta)
@@ -271,56 +270,106 @@ def _leer_montaje(  # noqa: C901, PLR0911, PLR0912 - deuda congelada
         return None
     if not isinstance(datos_escenas, list):
         return None
+    return fps, duracion_total, datos_escenas
 
+
+def _modos_de_guion(
+    guion: dict[str, Any],
+) -> dict[str, Literal["voz", "camara", "animacion"]] | None:
     escenas_guion = guion.get("escenas")
     if not isinstance(escenas_guion, list):
         return None
 
-    modos = {
+    return {
         escena.get("id"): escena.get("modo")
         for escena in escenas_guion
         if isinstance(escena, dict)
         and isinstance(escena.get("id"), str)
         and escena.get("modo") in {"voz", "camara", "animacion"}
     }
+
+
+def _cues_de_montaje(
+    valor_cues: object,
+    fps: float,
+    duracion: int,
+) -> list[int] | None:
+    if not isinstance(valor_cues, list):
+        return None
+
+    cues: list[int] = []
+    for cue in valor_cues:
+        if not isinstance(cue, dict):
+            return None
+        desde = cue.get("desde", 0)
+        if desde is None:
+            desde = 0
+        desde_entero = _fotogramas_no_negativos(desde, fps, maximo=duracion)
+        if desde_entero is None:
+            return None
+        cues.append(desde_entero)
+    return cues
+
+
+def _escena_de_montaje(
+    valor_escena: object,
+    modos: dict[str, Literal["voz", "camara", "animacion"]],
+    fps: float,
+    inicio: int,
+) -> MontajeEscena | None:
+    if not isinstance(valor_escena, dict):
+        return None
+    identificador = valor_escena.get("id")
+    if not isinstance(identificador, str):
+        return None
+    duracion = _fotogramas_no_negativos(valor_escena.get("duracion"), fps)
+    modo = modos.get(identificador)
+    if duracion is None or modo is None:
+        return None
+    cues = _cues_de_montaje(valor_escena.get("cues", []), fps, duracion)
+    if cues is None:
+        return None
+    return MontajeEscena(
+        id=identificador,
+        modo=modo,
+        inicio=inicio,
+        duracion=duracion,
+        cues=cues,
+    )
+
+
+def _escenas_de_montaje(
+    datos_escenas: list[Any],
+    modos: dict[str, Literal["voz", "camara", "animacion"]],
+    fps: float,
+) -> list[MontajeEscena] | None:
     inicio = 0
     escenas: list[MontajeEscena] = []
     for datos_escena in datos_escenas:
-        if not isinstance(datos_escena, dict):
+        escena = _escena_de_montaje(datos_escena, modos, fps, inicio)
+        if escena is None:
             return None
-        identificador = datos_escena.get("id")
-        if not isinstance(identificador, str):
-            return None
-        duracion = _fotogramas_no_negativos(datos_escena.get("duracion"), fps)
-        modo = modos.get(identificador)
-        if duracion is None or modo is None:
-            return None
-        datos_cues = datos_escena.get("cues", [])
-        if not isinstance(datos_cues, list):
-            return None
-        cues: list[int] = []
-        for cue in datos_cues:
-            if not isinstance(cue, dict):
-                return None
-            desde = cue.get("desde", 0)
-            if desde is None:
-                desde = 0
-            desde_entero = _fotogramas_no_negativos(desde, fps, maximo=duracion)
-            if desde_entero is None:
-                return None
-            cues.append(desde_entero)
-        escenas.append(
-            MontajeEscena(
-                id=identificador,
-                modo=modo,
-                inicio=inicio,
-                duracion=duracion,
-                cues=cues,
-            )
-        )
-        inicio += duracion
+        escenas.append(escena)
+        inicio += escena.duracion
         if inicio > int(MAX_DURACION_SEGUNDOS * fps):
             return None
+    return escenas
+
+
+def _leer_montaje(
+    ruta: Path | None,
+    guion: dict[str, Any],
+) -> Montaje | None:
+    datos_montaje = _datos_montaje_validos(ruta)
+    if datos_montaje is None:
+        return None
+    fps, duracion_total, datos_escenas = datos_montaje
+    modos = _modos_de_guion(guion)
+    if modos is None:
+        return None
+    escenas = _escenas_de_montaje(datos_escenas, modos, fps)
+    if escenas is None:
+        return None
     return Montaje(fps=fps, duracion=duracion_total, escenas=escenas)
 
 
