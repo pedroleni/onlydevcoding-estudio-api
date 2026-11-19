@@ -50,6 +50,23 @@ proyecto=$(crear_proyecto dependencia-sin-resolver)
 sed -i.bak 's/^dependencies = \[$/dependencies = [\n    "paquete-ficticio-sin-lock>=1.0",/' "$proyecto/pyproject.toml"
 espera 1 "dependencia que no está en uv.lock" "$proyecto" "sin versión resuelta en uv.lock: paquete-ficticio-sin-lock"
 
+proyecto=$(crear_proyecto vcs-flotante)
+sed -i.bak 's/^dependencies = \[$/dependencies = [\n    "paquete-ficticio-vcs @ git+https:\/\/example.invalid\/p.git@main",/' "$proyecto/pyproject.toml"
+espera 1 "dependencia de Git que apunta a una rama" "$proyecto" "referencia VCS flotante"
+
+proyecto=$(crear_proyecto grupo-sin-resolver)
+sed -i.bak 's/^dev = \[$/dev = [\n    "herramienta-ficticia-sin-lock>=1.0",/' "$proyecto/pyproject.toml"
+espera 1 "dependencia de desarrollo que no está en uv.lock" "$proyecto" "sin versión resuelta en uv.lock: herramienta-ficticia-sin-lock"
+
+# uv lock --check: una restricción que el lock no cumple, sin ningún otro fallo.
+if command -v uv >/dev/null 2>&1; then
+    proyecto=$(crear_proyecto lock-incoherente)
+    sed -i.bak 's/"fastapi>=[0-9.]*"/"fastapi>=999.0"/' "$proyecto/pyproject.toml"
+    espera 1 "pyproject.toml incoherente con uv.lock" "$proyecto" "uv.lock no es coherente"
+else
+    echo "AVISO: sin uv no se prueba la comprobación de coherencia del lock"
+fi
+
 proyecto=$(crear_proyecto git-flotante)
 cat >>"$proyecto/uv.lock" <<'TOML'
 
