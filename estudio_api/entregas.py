@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -101,10 +102,8 @@ def _borrar_directorios_vacios_sin_bloqueo(
     for directorio in reversed(directorios):
         if any(carpeta == directorio for carpeta, _ in _SUBIDAS_EN_CURSO):
             continue
-        try:
+        with contextlib.suppress(OSError):
             directorio.rmdir()
-        except OSError:
-            pass
 
 
 def _borrar_directorios_vacios(directorios: tuple[Path, ...]) -> None:
@@ -239,13 +238,11 @@ def _abrir_temporal(
                 if stat.S_ISREG(datos.st_mode):
                     if clave in _SUBIDAS_EN_CURSO:
                         raise EntregaExistente from error
-                    try:
+                    with contextlib.suppress(FileNotFoundError):
                         os.unlink(
                             nombre_temporal,
                             dir_fd=descriptor_directorio,
                         )
-                    except FileNotFoundError:
-                        pass
                     try:
                         descriptor = os.open(
                             nombre_temporal,
@@ -287,14 +284,10 @@ def _cerrar_y_borrar_temporal(
     descriptor_abierto: bool,
 ) -> None:
     if descriptor_abierto:
-        try:
+        with contextlib.suppress(OSError):
             os.close(temporal.descriptor)
-        except OSError:
-            pass
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.unlink(temporal.nombre, dir_fd=temporal.descriptor_directorio)
-    except FileNotFoundError:
-        pass
 
 
 def _limpiar_temporal_completo(temporal: _TemporalEntrega) -> None:
@@ -329,10 +322,8 @@ def _instalar_temporal(
             os.fsync(temporal.descriptor_directorio)
         except BaseException:
             if instalada:
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(archivo, dir_fd=temporal.descriptor_directorio)
-                except OSError:
-                    pass
             raise
     os.close(temporal.descriptor_directorio)
 
@@ -411,10 +402,8 @@ async def guardar_entrega(
         if temporal is not None:
             # ``_recibir_entrega`` ya lo limpia si empezó a consumir el cuerpo;
             # aquí cubrimos fallos posteriores y mantenemos la operación idempotente.
-            try:
+            with contextlib.suppress(OSError):
                 await run_in_threadpool(_limpiar_temporal_completo, temporal)
-            except OSError:
-                pass
         raise
     finally:
         await run_in_threadpool(
@@ -506,10 +495,8 @@ def _escribir_propuesta_cruda(descriptor_carpeta: int, datos: dict[str, Any]) ->
             dst_dir_fd=descriptor_carpeta,
         )
     except BaseException:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(temporal, dir_fd=descriptor_carpeta)
-        except FileNotFoundError:
-            pass
         raise
 
 
@@ -531,7 +518,7 @@ def _quitar_de_propuesta(descriptor_carpeta: int, archivo: str) -> None:
     _escribir_propuesta_cruda(descriptor_carpeta, {**datos, "archivos": restantes})
 
 
-def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:
+def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:  # noqa: PLR0912
     if PATRON_ARCHIVO_ENTREGA.fullmatch(archivo) is None:
         raise NombreEntregaInvalido
     carpeta = carpeta_entregas(config, curso, numero)

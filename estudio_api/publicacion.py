@@ -297,7 +297,7 @@ def _filtrar_medios(publicar: Path, publicacion: Publicacion) -> None:
                 textos.video = None
 
 
-def leer_publicacion(
+def leer_publicacion(  # noqa: PLR0911
     config: Config,
     carpeta: Path | None,
     *,

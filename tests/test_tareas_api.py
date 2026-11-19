@@ -434,7 +434,7 @@ def test_vista_cachea_curso_resumenes_y_leccion_por_peticion(cliente, cfg, monke
         "leer_lecciones": vista_tareas.leer_lecciones,
         "leer_leccion": vista_tareas.leer_leccion,
     }
-    llamadas = {nombre: 0 for nombre in originales}
+    llamadas = dict.fromkeys(originales, 0)
 
     def contador(nombre):
         def contar(*args, **kwargs):

@@ -1,0 +1,31 @@
+name: Informe semanal de clean code
+
+# Revisión completa periódica (docs/clean-code.md): deuda congelada, duplicados contando
+# los tests y código muerto. Queda como resumen de la ejecución y como artefacto
+# descargable; no necesita permisos de escritura.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # lunes a las 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  informe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+        with:
+          version: "0.13.8"
+      - run: uv sync --frozen
+      - name: Generar el informe
+        run: uv run --frozen python scripts/clean_code_informe.py > "$RUNNER_TEMP/informe.md"
+      - name: Resumen de la ejecución
+        run: cat "$RUNNER_TEMP/informe.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: informe-clean-code
+          path: ${{ runner.temp }}/informe.md
+          retention-days: 90

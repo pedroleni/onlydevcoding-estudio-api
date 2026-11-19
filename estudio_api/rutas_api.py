@@ -102,8 +102,7 @@ def listar_lecciones(
     with closing(abrir_bd(config.bd_ruta)) as bd:
         if not curso_existe(config, bd, curso):
             return Response(status_code=404)
-        lecciones = leer_lecciones(config, curso, bd)
-    return lecciones
+        return leer_lecciones(config, curso, bd)
 
 
 @router.get("/cursos/{curso}/lecciones/{numero}", response_model=Leccion)

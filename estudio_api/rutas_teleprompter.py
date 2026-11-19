@@ -24,7 +24,7 @@ from estudio_api.guion_textos import (
     escribir_json_versionado,
 )
 from estudio_api.lectura import datos_curso
-from estudio_api.rutas_acciones import lanzar_plan
+from estudio_api.rutas_acciones import http_de, lanzar_plan
 from estudio_api.rutas_api import (
     CursoId,
     NumeroLeccion,
@@ -213,10 +213,7 @@ def generar_previa_grabacion(
                 status_code=404,
                 detail="La lección no existe",
             ) from error
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
     return lanzar_plan(config, curso, numero, plan)
 
 

@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 import shutil
@@ -210,18 +211,14 @@ def _destino_en_leccion(contexto: _Contexto, *partes: str) -> Path:
 
 def _quitar_temporal(temporal: Path) -> None:
     """Borra lo que haya en la ruta del temporal sin seguir enlaces."""
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.unlink(temporal)
-    except FileNotFoundError:
-        pass
 
 
 def _crear_carpeta_real(ruta: Path) -> None:
     """Crea ``ruta`` si falta; tiene que acabar siendo un directorio, no un enlace."""
-    try:
+    with contextlib.suppress(FileExistsError):
         ruta.mkdir()
-    except FileExistsError:
-        pass
     if not stat.S_ISDIR(os.lstat(ruta).st_mode):
         raise NotADirectoryError("La carpeta del resultado no es un directorio real")
 
@@ -1086,7 +1083,7 @@ def _plan_mejorar_toma(
     )
 
 
-def plan_accion(
+def plan_accion(  # noqa: C901, PLR0911
     config: Config,
     curso: str,
     numero: int,

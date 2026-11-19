@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -106,6 +107,22 @@ class Propuesta(BaseModel):
     archivos: list[TomaPropuesta]
 
 
+def escenas_camara(guion: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Escenas de cámara del guion con un id ``E\\d{2}`` válido, en orden."""
+    escenas = guion.get("escenas")
+    if not isinstance(escenas, list):
+        return
+    for escena in escenas:
+        if not isinstance(escena, dict) or escena.get("modo") != "camara":
+            continue
+        identificador = escena.get("id")
+        if (
+            isinstance(identificador, str)
+            and PATRON_ESCENA_CAMARA.fullmatch(identificador) is not None
+        ):
+            yield identificador, escena
+
+
 def destinos_guion(
     guion: dict[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -113,19 +130,11 @@ def destinos_guion(
 
     Devuelve los mismos diccionarios del guion, no copias.
     """
-    camara: dict[str, dict[str, Any]] = {}
-    escenas = guion.get("escenas")
-    if isinstance(escenas, list):
-        for escena in escenas:
-            if not isinstance(escena, dict) or escena.get("modo") != "camara":
-                continue
-            identificador = escena.get("id")
-            if (
-                isinstance(identificador, str)
-                and PATRON_ESCENA_CAMARA.fullmatch(identificador) is not None
-                and isinstance(escena.get("cues"), list)
-            ):
-                camara[identificador] = escena
+    camara: dict[str, dict[str, Any]] = {
+        identificador: escena
+        for identificador, escena in escenas_camara(guion)
+        if isinstance(escena.get("cues"), list)
+    }
     ganchos: dict[str, dict[str, Any]] = {}
     datos_ganchos = guion.get("ganchos")
     if isinstance(datos_ganchos, list):

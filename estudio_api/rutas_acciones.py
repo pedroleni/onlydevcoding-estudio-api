@@ -31,6 +31,11 @@ class PeticionCancelar(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def http_de(error: AccionNoDisponible) -> HTTPException:
+    """Respuesta HTTP de una acción que no se puede lanzar."""
+    return HTTPException(status_code=error.estado_http, detail=error.mensaje)
+
+
 def lanzar_plan(
     config: Config,
     curso: str,
@@ -46,10 +51,7 @@ def lanzar_plan(
             detail="Ya hay un trabajo en marcha",
         ) from error
     except AccionNoDisponible as error:
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
 
 
 @router.get(
@@ -85,10 +87,7 @@ def ejecutar_accion(
     try:
         plan = plan_accion(config, curso, numero, accion, opciones)
     except AccionNoDisponible as error:
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
     return lanzar_plan(config, curso, numero, plan)
 
 

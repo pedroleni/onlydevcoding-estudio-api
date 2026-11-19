@@ -52,7 +52,7 @@ def _resolver_ruta(config: Config, ruta_publica: str) -> Path | None:
     return ruta
 
 
-def _rango_solicitado(
+def _rango_solicitado(  # noqa: PLR0911
     cabecera: str,
     tamano: int,
 ) -> tuple[int, int] | object | None:

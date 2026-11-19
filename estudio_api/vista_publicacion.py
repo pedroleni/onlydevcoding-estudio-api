@@ -84,7 +84,7 @@ def _textos_vista(
     )
 
 
-def _construir_pieza(
+def _construir_pieza(  # noqa: PLR0913
     config: Config,
     carpeta: Path | None,
     identificador: str,

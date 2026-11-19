@@ -1,3 +1,4 @@
+import contextlib
 import os
 import stat
 import tempfile
@@ -109,10 +110,8 @@ def _crear_directorio(ruta: Path) -> bool:
 
 def _borrar_directorios_vacios(directorios: tuple[Path, ...]) -> None:
     for directorio in reversed(directorios):
-        try:
+        with contextlib.suppress(OSError):
             directorio.rmdir()
-        except OSError:
-            pass
 
 
 def _limpiar_temporales_antiguos(grabaciones: Path) -> None:
@@ -244,10 +243,8 @@ def _cerrar_y_borrar_temporal(
     temporal: Path | None,
 ) -> None:
     if descriptor is not None:
-        try:
+        with contextlib.suppress(OSError):
             os.close(descriptor)
-        except OSError:
-            pass
     if temporal is not None:
         temporal.unlink(missing_ok=True)
 

@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -420,10 +420,8 @@ def _retirar_instalada(destino: Path, archivado: Path | None) -> None:
 
 
 def _quitar_directorio(directorio: Path) -> None:
-    try:
+    with suppress(FileNotFoundError):
         os.rmdir(directorio)
-    except FileNotFoundError:
-        pass
 
 
 def _deshacer(deshacer: _Deshacer) -> None:
@@ -531,7 +529,7 @@ def _salidas_del_plan(
     ]
 
 
-def _actualizar_propuesta(
+def _actualizar_propuesta(  # noqa: PLR0913
     config: Config,
     curso: str,
     numero: int,
@@ -557,7 +555,7 @@ def _actualizar_propuesta(
     )
 
 
-def _colocar_tomas(
+def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915
     config: Config,
     bd: sqlite3.Connection,
     curso: str,

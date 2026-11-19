@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -746,10 +746,8 @@ def _esperar_pids(ruta, plazo=10.0):
 
 def _matar_si_quedan(pids):
     for pid in pids:
-        try:
+        with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError, PermissionError:
-            pass
 
 
 def test_timeout_mata_al_hijo_y_al_nieto_y_deja_error_generico(tmp_path, monkeypatch):
