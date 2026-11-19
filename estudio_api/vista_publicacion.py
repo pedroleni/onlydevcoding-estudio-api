@@ -84,7 +84,7 @@ def _textos_vista(
     )
 
 
-def _construir_pieza(  # noqa: PLR0913
+def _construir_pieza(  # noqa: PLR0913 - deuda congelada
     config: Config,
     carpeta: Path | None,
     identificador: str,

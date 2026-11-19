@@ -1083,7 +1083,7 @@ def _plan_mejorar_toma(
     )
 
 
-def plan_accion(  # noqa: C901, PLR0911
+def plan_accion(  # noqa: C901, PLR0911 - deuda congelada
     config: Config,
     curso: str,
     numero: int,

@@ -297,7 +297,7 @@ def _filtrar_medios(publicar: Path, publicacion: Publicacion) -> None:
                 textos.video = None
 
 
-def leer_publicacion(  # noqa: PLR0911
+def leer_publicacion(  # noqa: PLR0911 - deuda congelada
     config: Config,
     carpeta: Path | None,
     *,

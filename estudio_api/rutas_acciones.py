@@ -13,7 +13,13 @@ from estudio_api.acciones import (
 )
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
-from estudio_api.rutas_api import CursoId, NumeroLeccion, TrabajoId, config_peticion
+from estudio_api.rutas_api import (
+    CursoId,
+    NumeroLeccion,
+    TrabajoId,
+    config_peticion,
+    http_de,
+)
 from estudio_api.trabajos import (
     PlanTrabajo,
     Trabajo,
@@ -29,11 +35,6 @@ router = APIRouter(prefix="/api")
 
 class PeticionCancelar(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-def http_de(error: AccionNoDisponible) -> HTTPException:
-    """Respuesta HTTP de una acción que no se puede lanzar."""
-    return HTTPException(status_code=error.estado_http, detail=error.mensaje)
 
 
 def lanzar_plan(

@@ -29,12 +29,12 @@ from estudio_api.entregas import (
 from estudio_api.lectura import _leer_json, datos_curso
 from estudio_api.propuesta import Propuesta, escenas_camara, leer_propuesta
 from estudio_api.rutas import ruta_segura
-from estudio_api.rutas_acciones import http_de
 from estudio_api.rutas_api import (
     CursoId,
     NumeroLeccion,
     config_peticion,
     exigir_leccion_libre,
+    http_de,
 )
 
 router = APIRouter(prefix="/api")

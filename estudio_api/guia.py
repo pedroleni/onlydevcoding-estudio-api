@@ -174,7 +174,7 @@ def rutas_regeneracion(
     return publicar, markdown, html, script
 
 
-def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913
+def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913 - deuda congelada
     config: Config,
     carpeta: Path,
     numero: int,

@@ -518,7 +518,7 @@ def _quitar_de_propuesta(descriptor_carpeta: int, archivo: str) -> None:
     _escribir_propuesta_cruda(descriptor_carpeta, {**datos, "archivos": restantes})
 
 
-def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:  # noqa: PLR0912
+def borrar_entrega(config: Config, curso: str, numero: int, archivo: str) -> bool:  # noqa: PLR0912 - deuda congelada
     if PATRON_ARCHIVO_ENTREGA.fullmatch(archivo) is None:
         raise NombreEntregaInvalido
     carpeta = carpeta_entregas(config, curso, numero)

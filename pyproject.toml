@@ -43,6 +43,8 @@ extend-select = [
     "UP",      # sintaxis moderna de Python 3.14
     "PERF",    # rendimiento evidente
     "ERA",     # código comentado
+    "RUF100",  # noqa que ya no hace falta
+    "PGH004",  # noqa sin código de regla
 ]
 
 [tool.ruff.lint.mccabe]
@@ -55,5 +57,5 @@ max-returns = 6
 max-statements = 50
 
 [tool.ruff.lint.per-file-ignores]
-# Los tests reciben fixtures que no siempre usan y comparan con literales.
+# Los tests reciben fixtures que no siempre usan.
 "tests/**" = ["ARG", "PLR0913", "PLR0915"]

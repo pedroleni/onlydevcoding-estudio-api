@@ -529,7 +529,7 @@ def _salidas_del_plan(
     ]
 
 
-def _actualizar_propuesta(  # noqa: PLR0913
+def _actualizar_propuesta(  # noqa: PLR0913 - deuda congelada
     config: Config,
     curso: str,
     numero: int,
@@ -555,7 +555,7 @@ def _actualizar_propuesta(  # noqa: PLR0913
     )
 
 
-def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915
+def _colocar_tomas(  # noqa: C901, PLR0912, PLR0915 - deuda congelada
     config: Config,
     bd: sqlite3.Connection,
     curso: str,

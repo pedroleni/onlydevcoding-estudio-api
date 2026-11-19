@@ -64,7 +64,7 @@ class SeguridadLocalMiddleware:
             token_escritura.encode("utf-8") if token_escritura is not None else None
         )
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915 - deuda congelada
         tipo_scope = scope["type"]
         if tipo_scope not in {"http", "websocket"}:
             await self.app(scope, receive, send)

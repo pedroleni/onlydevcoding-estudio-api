@@ -24,13 +24,14 @@ from estudio_api.guion_textos import (
     escribir_json_versionado,
 )
 from estudio_api.lectura import datos_curso
-from estudio_api.rutas_acciones import http_de, lanzar_plan
+from estudio_api.rutas_acciones import lanzar_plan
 from estudio_api.rutas_api import (
     CursoId,
     NumeroLeccion,
     TrabajoId,
     config_peticion,
     exigir_leccion_libre,
+    http_de,
 )
 from estudio_api.teleprompter import (
     Teleprompter,

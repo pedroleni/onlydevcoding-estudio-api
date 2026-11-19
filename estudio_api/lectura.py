@@ -139,7 +139,7 @@ def curso_en_disco(config: Config, curso: str) -> bool:
     )
 
 
-def _carpeta_desde_guion(  # noqa: PLR0911
+def _carpeta_desde_guion(  # noqa: PLR0911 - deuda congelada
     config: Config,
     datos: dict[str, Any],
     nombre_curso: str,
@@ -376,7 +376,7 @@ def leer_lecciones(
     return lecciones
 
 
-def _tiempos_montaje(  # noqa: C901
+def _tiempos_montaje(  # noqa: C901 - deuda congelada
     config: Config,
     identificador_guion: str,
 ) -> tuple[dict[str, tuple[float, float]], float | None]:
@@ -606,7 +606,7 @@ def _piezas(
     ]
 
 
-def _piezas_de_disco(  # noqa: C901, PLR0912
+def _piezas_de_disco(  # noqa: C901, PLR0912 - deuda congelada
     config: Config,
     carpeta: Path | None,
     titulo_leccion: str,
