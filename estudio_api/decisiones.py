@@ -73,7 +73,7 @@ def _crear_tablas_tareas(bd: sqlite3.Connection) -> None:
         """
         CREATE TABLE tarea (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT NOT NULL,
+            fecha TEXT,
             hora TEXT,
             texto TEXT NOT NULL,
             tipo TEXT NOT NULL REFERENCES tipo_tarea(id),
@@ -158,7 +158,40 @@ def _copia_antes_de_migrar(
         temporal.unlink(missing_ok=True)
 
 
-VERSION_BD = 5
+VERSION_BD = 6
+
+
+def _permitir_tareas_sin_fecha(bd: sqlite3.Connection) -> None:
+    # SQLite no quita un NOT NULL con ALTER: se rehace la tabla con los mismos ids.
+    # Nadie referencia a tarea, así que se puede borrar con las claves foráneas activas.
+    bd.execute(
+        """
+        CREATE TABLE tarea_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            hora TEXT,
+            texto TEXT NOT NULL,
+            tipo TEXT NOT NULL REFERENCES tipo_tarea(id),
+            curso TEXT,
+            numero INTEGER,
+            pieza TEXT,
+            red TEXT,
+            hecha INTEGER NOT NULL DEFAULT 0,
+            hecha_en TEXT
+        )
+        """
+    )
+    bd.execute(
+        """
+        INSERT INTO tarea_v6
+            (id, fecha, hora, texto, tipo, curso, numero, pieza, red, hecha, hecha_en)
+        SELECT id, fecha, hora, texto, tipo, curso, numero, pieza, red, hecha, hecha_en
+        FROM tarea
+        """
+    )
+    bd.execute("DROP TABLE tarea")
+    bd.execute("ALTER TABLE tarea_v6 RENAME TO tarea")
+    bd.execute("CREATE INDEX idx_tarea_fecha ON tarea(fecha)")
 
 
 def _crear_tabla_gancho_grabado(bd: sqlite3.Connection) -> None:
@@ -184,10 +217,10 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
         version = bd.execute("PRAGMA user_version").fetchone()[0]
         if version == VERSION_BD:
             return bd
-        if version not in (0, 1, 2, 3, 4):
+        if version not in (0, 1, 2, 3, 4, 5):
             raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
 
-        if version in (1, 2, 3, 4):
+        if version in (1, 2, 3, 4, 5):
             # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
             # por su propia conexión.
             _copia_antes_de_migrar(bd, ruta, version)
@@ -200,7 +233,7 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
             if version == VERSION_BD:
                 bd.execute("COMMIT")
                 return bd
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise RuntimeError(
                     f"Versión de la base de datos no soportada: {version}"
                 )
@@ -214,6 +247,8 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
                 bd.execute("ALTER TABLE trabajo ADD COLUMN objetivo TEXT")
             if version in (0, 1, 2, 3, 4):
                 _crear_tabla_gancho_grabado(bd)
+            if version in (2, 3, 4, 5):
+                _permitir_tareas_sin_fecha(bd)
             bd.execute(f"PRAGMA user_version = {VERSION_BD}")
             bd.execute("COMMIT")
         except Exception:

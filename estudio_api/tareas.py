@@ -59,7 +59,8 @@ class EnlaceTarea(_ModeloEstricto):
 
 
 class TareaNueva(_ModeloEstricto):
-    fecha: date
+    # Sin fecha, la tarea está en la lista total y no en ningún día.
+    fecha: date | None = None
     hora: str | None = None
     texto: str
     tipo: str
@@ -68,6 +69,8 @@ class TareaNueva(_ModeloEstricto):
     @field_validator("fecha", mode="before")
     @classmethod
     def validar_formato_fecha(cls, valor: object) -> object:
+        if valor is None:
+            return None
         if isinstance(valor, str):
             if _PATRON_FECHA.fullmatch(valor) is None:
                 raise ValueError("La fecha debe tener formato YYYY-MM-DD")
@@ -177,6 +180,12 @@ _SELECT_TAREAS_ENTRE = """
     WHERE fecha BETWEEN ? AND ?
     ORDER BY fecha, hora IS NULL, hora, id
 """
+_SELECT_TAREAS_SIN_FECHA = """
+    SELECT id, fecha, hora, texto, tipo, curso, numero, pieza, red, hecha, hecha_en
+    FROM tarea
+    WHERE fecha IS NULL
+    ORDER BY curso IS NULL, curso, numero IS NULL, numero, id
+"""
 _SELECT_TAREAS_ATRASADAS = """
     SELECT id, fecha, hora, texto, tipo, curso, numero, pieza, red, hecha, hecha_en
     FROM tarea
@@ -221,6 +230,10 @@ def _valores_enlace(
     return enlace.curso, enlace.numero, enlace.pieza, enlace.red
 
 
+def _fecha_texto(fecha: date | None) -> str | None:
+    return fecha.isoformat() if fecha is not None else None
+
+
 def crear_tarea(bd: sqlite3.Connection, nueva: TareaNueva) -> Tarea:
     curso, numero, pieza, red = _valores_enlace(nueva.enlace)
     with nullcontext() if bd.in_transaction else bd:
@@ -231,7 +244,7 @@ def crear_tarea(bd: sqlite3.Connection, nueva: TareaNueva) -> Tarea:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                nueva.fecha.isoformat(),
+                _fecha_texto(nueva.fecha),
                 nueva.hora,
                 nueva.texto,
                 nueva.tipo,
@@ -258,7 +271,7 @@ def editar_tarea(bd: sqlite3.Connection, id: int, nueva: TareaNueva) -> Tarea | 
             WHERE id = ?
             """,
             (
-                nueva.fecha.isoformat(),
+                _fecha_texto(nueva.fecha),
                 nueva.hora,
                 nueva.texto,
                 nueva.tipo,
@@ -294,6 +307,11 @@ def tareas_entre(bd: sqlite3.Connection, desde: date, hasta: date) -> list[Tarea
         (desde.isoformat(), hasta.isoformat()),
     )
     return [_tarea_desde_fila(fila) for fila in filas]
+
+
+def tareas_sin_fecha(bd: sqlite3.Connection) -> list[Tarea]:
+    """Todas las tareas sin día, hechas o no, ordenadas por curso y lección."""
+    return [_tarea_desde_fila(fila) for fila in bd.execute(_SELECT_TAREAS_SIN_FECHA)]
 
 
 def tareas_atrasadas(

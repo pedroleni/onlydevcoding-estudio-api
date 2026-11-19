@@ -11,6 +11,7 @@ from estudio_api.lectura import (
     leer_lecciones,
 )
 from estudio_api.modelos import Curso, Leccion, LeccionResumen
+from estudio_api.reels import leer_temario
 from estudio_api.tareas import Tarea
 
 
@@ -44,6 +45,20 @@ class _CacheEnlaces:
         self._datos: dict[str, Any] = {}
         self._lecciones: dict[str, dict[int, LeccionResumen]] = {}
         self._detalles: dict[tuple[str, int], Leccion | None] = {}
+        self._temarios: dict[str, dict[int, str]] = {}
+
+    def _titulos_temario(self, curso: str) -> dict[int, str]:
+        if curso not in self._temarios:
+            try:
+                temario = leer_temario(self.config, curso)
+            except Exception:  # noqa: BLE001 - el enlace roto tolera cualquier lector.
+                temario = None
+            self._temarios[curso] = (
+                {leccion.numero: leccion.titulo for leccion in temario.lecciones}
+                if temario is not None
+                else {}
+            )
+        return self._temarios[curso]
 
     def _curso(self, identificador: str) -> Curso | None:
         # Mismo criterio que el listado de cursos y que la validación al crear.
@@ -99,8 +114,12 @@ class _CacheEnlaces:
         if enlace.numero is not None and curso is not None:
             # Una lección que solo tiene guion sigue siendo válida: aún se prepara.
             resumen = self._resumenes(enlace.curso).get(enlace.numero)
-            if resumen is None:
+            prevista = self._titulos_temario(enlace.curso).get(enlace.numero)
+            if resumen is None and (prevista is None or enlace.pieza is not None):
                 roto = True
+            elif resumen is None:
+                # Solo en el temario: aún no hay carpeta, pero la lección existe.
+                leccion_titulo = prevista
             else:
                 leccion_titulo = resumen.titulo
 

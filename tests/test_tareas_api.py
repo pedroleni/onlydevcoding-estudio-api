@@ -692,3 +692,87 @@ def test_cuerpos_con_campos_extra_devuelven_422(cliente_con_token, ruta, cuerpo)
     respuesta = cliente_con_token.post(ruta, headers=CABECERAS, json=cuerpo)
 
     assert respuesta.status_code == 422
+
+
+def _temario_react(cfg):
+    (cfg.cursos_dir / "REACT" / "TEMARIO.json").write_text(
+        json.dumps(
+            {
+                "lecciones": [
+                    {"numero": 4, "titulo": "Importar", "modulo": "Base"},
+                    {"numero": 40, "titulo": "Efectos y limpieza", "modulo": "Efectos"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_tarea_sin_fecha_se_crea_y_sale_en_la_lista_total(cliente_con_token):
+    sin_fecha = {**_nueva(texto="Grabar la voz"), "fecha": None}
+    omitida = _nueva(texto="Montar el vídeo")
+    del omitida["fecha"]
+
+    primera = cliente_con_token.post("/api/tareas", headers=CABECERAS, json=sin_fecha)
+    segunda = cliente_con_token.post("/api/tareas", headers=CABECERAS, json=omitida)
+    con_dia = cliente_con_token.post("/api/tareas", headers=CABECERAS, json=_nueva())
+
+    assert primera.status_code == 201
+    assert primera.json()["fecha"] is None
+    assert segunda.status_code == 201
+    lista = cliente_con_token.get("/api/tareas/sin-fecha")
+    assert lista.status_code == 200
+    assert [t["id"] for t in lista.json()] == [
+        primera.json()["id"],
+        segunda.json()["id"],
+    ]
+    assert con_dia.json()["id"] not in [t["id"] for t in lista.json()]
+
+    # Ponerle día desde la web es un PUT normal.
+    editada = cliente_con_token.put(
+        f"/api/tareas/{primera.json()['id']}",
+        headers=CABECERAS,
+        json={**sin_fecha, "fecha": "2026-11-20"},
+    )
+    assert editada.json()["fecha"] == "2026-11-20"
+    assert [t["id"] for t in cliente_con_token.get("/api/tareas/sin-fecha").json()] == [
+        segunda.json()["id"]
+    ]
+
+
+def test_enlace_a_leccion_del_temario_sin_carpeta(cliente_con_token, cfg):
+    _temario_react(cfg)
+
+    creada = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json={**_nueva(enlace={"curso": "react", "numero": 40}), "fecha": None},
+    )
+    ausente = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json=_nueva(enlace={"curso": "react", "numero": 41}),
+    )
+    pieza = cliente_con_token.post(
+        "/api/tareas",
+        headers=CABECERAS,
+        json=_nueva(enlace={"curso": "react", "numero": 40, "pieza": "leccion"}),
+    )
+
+    assert creada.status_code == 201
+    assert creada.json()["enlace_vista"] == {
+        "curso_nombre": "React",
+        "leccion_titulo": "Efectos y limpieza",
+        "pieza_titulo": None,
+        "roto": False,
+    }
+    assert ausente.status_code == 422
+    assert ausente.json()["detail"] == "La lección no existe"
+    # Una lección que solo está en el temario aún no tiene piezas.
+    assert pieza.status_code == 422
+    assert (
+        cliente_con_token.get("/api/tareas/sin-fecha").json()[0]["enlace_vista"][
+            "leccion_titulo"
+        ]
+        == "Efectos y limpieza"
+    )
