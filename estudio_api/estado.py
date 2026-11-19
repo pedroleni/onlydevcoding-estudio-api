@@ -260,7 +260,7 @@ def _numero_y_curso_validos(curso: str, numero: int) -> bool:
     )
 
 
-def calcular_estado(
+def calcular_estado(  # noqa: PLR0913 - deuda congelada
     config: Config,
     curso: str,
     numero: int,

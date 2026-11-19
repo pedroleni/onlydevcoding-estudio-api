@@ -524,7 +524,7 @@ def _guardar_copia(plan: PlanTrabajo) -> None:
         raise
 
 
-def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
+def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915 - deuda congelada
     with _BLOQUEO:
         # ``lanzar`` lo registra siempre antes de arrancar el hilo.
         en_curso = _EN_CURSO[trabajo_id]

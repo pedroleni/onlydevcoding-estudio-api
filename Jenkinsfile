@@ -65,6 +65,13 @@ pipeline {
                 sh 'uv run --frozen pytest -q'
             }
         }
+
+        // Puerta automática de clean code (docs/clean-code.md), la misma que en GitHub.
+        stage('Clean code') {
+            steps {
+                sh 'uv run --frozen bash scripts/clean_code.sh'
+            }
+        }
     }
 
     post {

@@ -1,7 +1,7 @@
 import sqlite3
 from collections.abc import Collection
 from contextlib import closing
-from typing import Annotated, cast
+from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, status
 from starlette.responses import Response
@@ -34,6 +34,18 @@ LECCION_OCUPADA = (
     "No se puede cambiar mientras se prepara esta lección. "
     "Espera a que termine el trabajo."
 )
+
+
+class ErrorConEstadoHttp(Protocol):
+    """Error de dominio que ya sabe con qué estado y mensaje responder."""
+
+    estado_http: int
+    mensaje: str
+
+
+def http_de(error: ErrorConEstadoHttp) -> HTTPException:
+    """Respuesta HTTP de un error de dominio con su estado y su mensaje."""
+    return HTTPException(status_code=error.estado_http, detail=error.mensaje)
 
 
 def config_peticion(request: Request) -> Config:
@@ -102,8 +114,7 @@ def listar_lecciones(
     with closing(abrir_bd(config.bd_ruta)) as bd:
         if not curso_existe(config, bd, curso):
             return Response(status_code=404)
-        lecciones = leer_lecciones(config, curso, bd)
-    return lecciones
+        return leer_lecciones(config, curso, bd)
 
 
 @router.get("/cursos/{curso}/lecciones/{numero}", response_model=Leccion)

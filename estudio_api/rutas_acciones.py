@@ -13,7 +13,13 @@ from estudio_api.acciones import (
 )
 from estudio_api.config import Config
 from estudio_api.decisiones import abrir_bd
-from estudio_api.rutas_api import CursoId, NumeroLeccion, TrabajoId, config_peticion
+from estudio_api.rutas_api import (
+    CursoId,
+    NumeroLeccion,
+    TrabajoId,
+    config_peticion,
+    http_de,
+)
 from estudio_api.trabajos import (
     PlanTrabajo,
     Trabajo,
@@ -46,10 +52,7 @@ def lanzar_plan(
             detail="Ya hay un trabajo en marcha",
         ) from error
     except AccionNoDisponible as error:
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
 
 
 @router.get(
@@ -85,10 +88,7 @@ def ejecutar_accion(
     try:
         plan = plan_accion(config, curso, numero, accion, opciones)
     except AccionNoDisponible as error:
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
     return lanzar_plan(config, curso, numero, plan)
 
 

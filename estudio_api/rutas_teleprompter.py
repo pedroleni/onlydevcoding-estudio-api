@@ -31,6 +31,7 @@ from estudio_api.rutas_api import (
     TrabajoId,
     config_peticion,
     exigir_leccion_libre,
+    http_de,
 )
 from estudio_api.teleprompter import (
     Teleprompter,
@@ -213,10 +214,7 @@ def generar_previa_grabacion(
                 status_code=404,
                 detail="La lección no existe",
             ) from error
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
     return lanzar_plan(config, curso, numero, plan)
 
 

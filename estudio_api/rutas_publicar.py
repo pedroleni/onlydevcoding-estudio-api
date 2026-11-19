@@ -209,7 +209,7 @@ def cambiar_estado(
     "/cursos/{curso}/lecciones/{numero}/publicacion/piezas/{pieza}/redes/{red}/textos",
     response_model=VistaPublicacion,
 )
-def cambiar_textos(
+def cambiar_textos(  # noqa: C901, PLR0912 - deuda congelada
     request: Request,
     textos: TextosRedEditables,
     curso: CursoId,

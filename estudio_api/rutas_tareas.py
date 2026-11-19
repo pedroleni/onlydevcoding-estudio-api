@@ -72,6 +72,48 @@ def _en_temario(config: Config, curso: str, numero: int) -> bool:
     )
 
 
+def _error_enlace(detalle: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detalle)
+
+
+def _validar_curso_enlazado(
+    config: Config, bd: sqlite3.Connection, enlace: EnlaceTarea
+) -> None:
+    # Mismo criterio que el listado de cursos y que la vista de tareas.
+    en_disco = enlace.curso in ids_cursos_en_disco(config)
+    en_app = any(curso.id == enlace.curso for curso in cursos_app(bd))
+    if not en_disco and not en_app:
+        raise _error_enlace("El curso no existe")
+    if enlace.numero is not None and not en_disco:
+        raise _error_enlace(
+            "Un curso sin carpeta solo se puede enlazar a nivel de curso"
+        )
+
+
+def _leccion_en_listado(
+    config: Config, bd: sqlite3.Connection, curso: str, numero: int
+) -> bool:
+    try:
+        return any(
+            leccion.numero == numero for leccion in leer_lecciones(config, curso, bd)
+        )
+    except Exception as error:
+        raise _error_enlace("No se ha podido leer la lección") from error
+
+
+def _validar_pieza_enlazada(
+    config: Config, bd: sqlite3.Connection, curso: str, numero: int, pieza: str
+) -> None:
+    try:
+        leccion = leer_leccion(config, curso, numero, bd)
+    except Exception as error:
+        raise _error_enlace("No se ha podido leer la lección") from error
+    if leccion is None:
+        raise _error_enlace("La lección no existe")
+    if all(candidata.id != pieza for candidata in leccion.piezas):
+        raise _error_enlace("La pieza no existe")
+
+
 def _validar_enlace(
     config: Config,
     bd: sqlite3.Connection,
@@ -79,58 +121,22 @@ def _validar_enlace(
 ) -> None:
     if enlace is None:
         return
-
-    # Mismo criterio que el listado de cursos y que la vista de tareas.
-    en_disco = enlace.curso in ids_cursos_en_disco(config)
-    en_app = any(curso.id == enlace.curso for curso in cursos_app(bd))
-    if not en_disco and not en_app:
-        raise HTTPException(status_code=422, detail="El curso no existe")
+    _validar_curso_enlazado(config, bd, enlace)
     if enlace.numero is None:
         return
-    if not en_disco:
-        raise HTTPException(
-            status_code=422,
-            detail="Un curso sin carpeta solo se puede enlazar a nivel de curso",
-        )
 
-    try:
-        resumen = next(
-            (
-                leccion
-                for leccion in leer_lecciones(config, enlace.curso, bd)
-                if leccion.numero == enlace.numero
-            ),
-            None,
-        )
-    except Exception as error:
-        raise HTTPException(
-            status_code=422,
-            detail="No se ha podido leer la lección",
-        ) from error
     # Basta con que la lección esté en el listado, aunque solo tenga guion:
     # son justo las que aún se preparan o se graban.
-    if resumen is None:
+    if not _leccion_en_listado(config, bd, enlace.curso, enlace.numero):
         # Una lección que solo está en el temario también se planifica, pero aún no
         # tiene piezas a las que enlazar.
         if not _en_temario(config, enlace.curso, enlace.numero):
-            raise HTTPException(status_code=422, detail="La lección no existe")
+            raise _error_enlace("La lección no existe")
         if enlace.pieza is not None:
-            raise HTTPException(status_code=422, detail="La pieza no existe")
+            raise _error_enlace("La pieza no existe")
         return
-    if enlace.pieza is None:
-        return
-
-    try:
-        leccion = leer_leccion(config, enlace.curso, enlace.numero, bd)
-    except Exception as error:
-        raise HTTPException(
-            status_code=422,
-            detail="No se ha podido leer la lección",
-        ) from error
-    if leccion is None:
-        raise HTTPException(status_code=422, detail="La lección no existe")
-    if all(pieza.id != enlace.pieza for pieza in leccion.piezas):
-        raise HTTPException(status_code=422, detail="La pieza no existe")
+    if enlace.pieza is not None:
+        _validar_pieza_enlazada(config, bd, enlace.curso, enlace.numero, enlace.pieza)
 
 
 def _validar_tarea_nueva(

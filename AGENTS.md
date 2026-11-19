@@ -26,6 +26,7 @@ al producto o a la seguridad: señala la duda.
 - Tests sin red: `uv run --offline pytest -q`
 - Lint: `uv run ruff check .`
 - Scanners: `for s in scripts/security/scan_*.sh; do bash "$s"; done`
+- Clean code: `uv run --frozen bash scripts/clean_code.sh` (informe completo: `uv run --frozen python scripts/clean_code_informe.py`)
 
 ## Seguridad obligatoria
 
@@ -54,6 +55,23 @@ risk score es `CRITICAL×25 + HIGH×10 + MEDIUM×3 + LOW×1`, con tope 100. Guar
 las auditorías completas en `security/reviews/YYYY-MM-DD-<tema>.md` siguiendo
 su README; los chequeos puntuales no requieren un informe allí.
 
+## Clean code obligatorio
+
+Las normas están en `docs/clean-code.md` (convenciones del repo, normas por tecnología con
+sus fuentes, umbrales y checklist del revisor). Léelas antes de escribir código.
+
+1. Antes de abrir una PR, la puerta automática tiene que estar en verde: `uv run --frozen bash scripts/clean_code.sh`.
+2. Después, el agente `.claude/agents/clean-code.md` revisa el diff contra `main` (modo
+   `cambios`) con la suscripción de Claude Code, sin claves de API. Su bloque
+   «## Revisión clean code» va en la descripción de la PR. Si hay más commits después,
+   se vuelve a pasar: la CI comprueba que el veredicto es `APROBADO` y que corresponde al
+   último commit.
+3. No se añade deuda: nada de ``# noqa`` nuevo para saltarse una regla de complejidad o
+   tamaño sin justificarlo en la PR. Al refactorizar código con deuda congelada, quita el `# noqa` que ya no haga falta.
+4. Revisión completa: cada lunes `.github/workflows/clean-code-semanal.yml` deja el
+   informe en el resumen de la ejecución y como artefacto `informe-clean-code`; cuando se pida, el agente
+   hace la auditoría completa (modo `auditoria`) y propone PR pequeñas para reducir deuda.
+
 ## Enforcement
 
 - `bash scripts/security/install_hooks.sh` configura `.githooks/pre-commit`.
@@ -67,7 +85,8 @@ su README; los chequeos puntuales no requieren un informe allí.
 1. Parte de `main` actualizado y crea `feat/<nombre-corto>` o
    `fix/<nombre-corto>`.
 2. Una rama contiene una tarea o un grupo pequeño y cohesionado.
-3. Ejecuta scanners, `uv run ruff check .` y `uv run pytest -q`.
+3. Ejecuta scanners, `uv run ruff check .`, `uv run pytest -q` y la puerta de clean
+   code; pasa el agente `clean-code` y pega su veredicto en la PR.
 4. Haz commits normales en la rama, push y PR contra `main`.
 5. Solo integra cuando CI esté verde y la revisión haya terminado. Nunca hagas
    push directo a `main`.

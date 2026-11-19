@@ -249,7 +249,7 @@ def _fotogramas_no_negativos(
     return valor
 
 
-def _leer_montaje(
+def _leer_montaje(  # noqa: C901, PLR0911, PLR0912 - deuda congelada
     ruta: Path | None,
     guion: dict[str, Any],
 ) -> Montaje | None:

@@ -27,13 +27,14 @@ from estudio_api.entregas import (
     listar_entregas,
 )
 from estudio_api.lectura import _leer_json, datos_curso
-from estudio_api.propuesta import PATRON_ESCENA_CAMARA, Propuesta, leer_propuesta
+from estudio_api.propuesta import Propuesta, escenas_camara, leer_propuesta
 from estudio_api.rutas import ruta_segura
 from estudio_api.rutas_api import (
     CursoId,
     NumeroLeccion,
     config_peticion,
     exigir_leccion_libre,
+    http_de,
 )
 
 router = APIRouter(prefix="/api")
@@ -76,7 +77,6 @@ class PeticionColocar(BaseModel):
 
 def _destinos(
     config: Config,
-    curso: str,
     numero: int,
     *,
     datos: Any,
@@ -109,25 +109,15 @@ def _destinos(
             }
 
     camara: list[DestinoCamara] = []
-    escenas = guion.get("escenas")
-    if isinstance(escenas, list):
-        for escena in escenas:
-            if not isinstance(escena, dict) or escena.get("modo") != "camara":
-                continue
-            identificador = escena.get("id")
-            if (
-                not isinstance(identificador, str)
-                or PATRON_ESCENA_CAMARA.fullmatch(identificador) is None
-            ):
-                continue
-            titulo = escena.get("titulo")
-            camara.append(
-                DestinoCamara(
-                    id=identificador,
-                    titulo=titulo if isinstance(titulo, str) else identificador,
-                    tiene_toma=isinstance(escena.get("toma"), dict),
-                )
+    for identificador, escena in escenas_camara(guion):
+        titulo = escena.get("titulo")
+        camara.append(
+            DestinoCamara(
+                id=identificador,
+                titulo=titulo if isinstance(titulo, str) else identificador,
+                tiene_toma=isinstance(escena.get("toma"), dict),
             )
+        )
 
     ganchos: list[DestinoGancho] = []
     datos_ganchos = guion.get("ganchos")
@@ -169,7 +159,7 @@ def obtener_entregas(
         datos = datos_curso(config, curso)
         entregas = listar_entregas(config, curso, numero, datos=datos)
         propuesta = leer_propuesta(config, curso, numero, datos=datos)
-        destinos = _destinos(config, curso, numero, datos=datos)
+        destinos = _destinos(config, numero, datos=datos)
     except (OSError, ValueError) as error:
         raise HTTPException(
             status_code=503,
@@ -222,10 +212,7 @@ def colocar_entregas(
                 peticion.asignaciones,
             )
     except ColocacionNoValida as error:
-        raise HTTPException(
-            status_code=error.estado_http,
-            detail=error.mensaje,
-        ) from error
+        raise http_de(error) from error
 
 
 @router.put(

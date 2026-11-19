@@ -209,7 +209,7 @@ def _crear_tabla_gancho_grabado(bd: sqlite3.Connection) -> None:
     )
 
 
-def abrir_bd(ruta: Path) -> sqlite3.Connection:
+def abrir_bd(ruta: Path) -> sqlite3.Connection:  # noqa: C901, PLR0912 - deuda congelada
     ruta.parent.mkdir(parents=True, exist_ok=True)
     bd = sqlite3.connect(ruta)
     try:

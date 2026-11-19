@@ -174,7 +174,7 @@ def rutas_regeneracion(
     return publicar, markdown, html, script
 
 
-def regenerar_guia(
+def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913 - deuda congelada
     config: Config,
     carpeta: Path,
     numero: int,
@@ -245,10 +245,8 @@ def regenerar_guia(
         try:
             proceso.communicate(timeout=TIMEOUT_CONVERSOR_S)
         except subprocess.TimeoutExpired:
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(proceso.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             try:
                 proceso.communicate(timeout=TIMEOUT_RECOGIDA_S)
             except subprocess.TimeoutExpired:
