@@ -14,7 +14,7 @@ que sirve, visto desde la web.
 | | |
 |---|---|
 | ![Curso con el avance de cada lección](docs/capturas/curso.png) | ![Avance global de publicación del curso](docs/capturas/publicacion.png) |
-| `GET /api/cursos/{curso}/lecciones` y `/temario`: estado de producción de cada lección. | `GET …/publicacion` y estados por red: qué está subido y qué falta. |
+| `GET /api/cursos/{curso}/lecciones` y `/temario`: estado de producción de cada lección. | `GET /api/cursos/{curso}/lecciones/{numero}/publicacion` de cada lección, sumadas en la web: qué está subido y qué falta. |
 
 ![Tareas sin fecha agrupadas por lección](docs/capturas/tareas-todas.png)
 
@@ -51,7 +51,7 @@ puertas: tests, seguridad, clean code y CI. Cada herramienta tiene un papel fijo
 
 | Quién | Qué hace | Qué no hace |
 |---|---|---|
-| **Claude Code** | Diseña (spec y plan por fases en `docs/`), reparte el trabajo, verifica por su cuenta (tests, build, escáneres, Playwright a varios anchos), pasa el agente de clean code, hace los commits, abre las PR y las integra cuando la CI está en verde. | No da por buena la palabra de otro agente: todo se vuelve a comprobar. |
+| **Claude Code** | Diseña (spec y plan por fases en `docs/specs` y `docs/plans`), reparte el trabajo, verifica por su cuenta (tests, build, escáneres, Playwright a varios anchos), pasa el agente de clean code, hace los commits, abre las PR y las integra cuando la CI está en verde. | No da por buena la palabra de otro agente: todo se vuelve a comprobar. |
 | **Codex** | Implementa una tarea acotada del plan con sus tests, siguiendo `AGENTS.md`. | No toca `.git` ni la red (su sandbox no lo permite) ni comprueba la interfaz en el navegador: eso lo hace Claude Code. Si se queda sin cuota, implementa Claude Code. |
 | **Agente `clean-code`** | Revisa el diff de cada PR contra `docs/clean-code.md` y emite un veredicto; en modo `auditoria` revisa el repo entero. | No edita: informa. Se ejecuta con la suscripción de Claude Code, sin claves de API. |
 | **Agentes `security-*`** | Ocho checklists de seguridad (`.claude/agents/security-*.md`) para auditorías y cambios sensibles. | Solo reportan hallazgos con más del 80 % de confianza. |
@@ -59,7 +59,7 @@ puertas: tests, seguridad, clean code y CI. Cada herramienta tiene un papel fijo
 
 ```mermaid
 flowchart LR
-    idea([Idea o petición]) --> plan["Claude Code<br/>spec y plan por fases<br/>docs/specs · docs/plans"]
+    idea([Idea o petición]) --> plan["Claude Code<br/>spec y plan por fases"]
     plan --> impl["Codex<br/>implementa la tarea<br/>con sus tests"]
     impl --> verif["Claude Code<br/>verifica: tests, build,<br/>escáneres, Playwright"]
     verif -- falla --> impl
