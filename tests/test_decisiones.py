@@ -732,3 +732,25 @@ def test_abrir_bd_migra_v5_permite_tareas_sin_fecha_y_guarda_copia(tmp_path):
     copia = ruta_bd.with_name(f"{ruta_bd.name}.v5")
     with closing(sqlite3.connect(copia)) as bd:
         assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://vm.tiktok.com/ZN8aEmGQm/", "https://vt.tiktok.com/ZSabc123/"],
+)
+def test_estado_red_acepta_los_enlaces_cortos_de_tiktok(url):
+    # La app de TikTok solo da el enlace corto al compartir; se guarda tal cual.
+    assert EstadoRed(estado="publicado", url=url).url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://vm.tiktok.com.evil.example/x",
+        "https://xvm.tiktok.com/x",
+        "http://vm.tiktok.com/x",
+    ],
+)
+def test_estado_red_rechaza_imitaciones_del_enlace_corto(url):
+    with pytest.raises(ValidationError):
+        EstadoRed(estado="publicado", url=url)

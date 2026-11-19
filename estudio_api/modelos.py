@@ -13,6 +13,9 @@ HOSTS_PUBLICACION = frozenset(
         "www.instagram.com",
         "tiktok.com",
         "www.tiktok.com",
+        # Enlaces cortos: la app de TikTok solo da estos al compartir.
+        "vm.tiktok.com",
+        "vt.tiktok.com",
         "linkedin.com",
         "www.linkedin.com",
     }
