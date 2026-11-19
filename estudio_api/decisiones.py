@@ -158,18 +158,36 @@ def _copia_antes_de_migrar(
         temporal.unlink(missing_ok=True)
 
 
+VERSION_BD = 5
+
+
+def _crear_tabla_gancho_grabado(bd: sqlite3.Connection) -> None:
+    # Ganchos verticales (reels) marcados a mano como grabados en el teleprompter.
+    bd.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gancho_grabado (
+            curso TEXT NOT NULL,
+            numero INTEGER NOT NULL,
+            gancho TEXT NOT NULL,
+            fecha TEXT NOT NULL,
+            PRIMARY KEY (curso, numero, gancho)
+        )
+        """
+    )
+
+
 def abrir_bd(ruta: Path) -> sqlite3.Connection:
     ruta.parent.mkdir(parents=True, exist_ok=True)
     bd = sqlite3.connect(ruta)
     try:
         bd.execute("PRAGMA foreign_keys = ON")
         version = bd.execute("PRAGMA user_version").fetchone()[0]
-        if version == 4:
+        if version == VERSION_BD:
             return bd
-        if version not in (0, 1, 2, 3):
+        if version not in (0, 1, 2, 3, 4):
             raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
 
-        if version in (1, 2, 3):
+        if version in (1, 2, 3, 4):
             # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
             # por su propia conexión.
             _copia_antes_de_migrar(bd, ruta, version)
@@ -179,10 +197,10 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
         try:
             bd.execute("BEGIN IMMEDIATE")
             version = bd.execute("PRAGMA user_version").fetchone()[0]
-            if version == 4:
+            if version == VERSION_BD:
                 bd.execute("COMMIT")
                 return bd
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError(
                     f"Versión de la base de datos no soportada: {version}"
                 )
@@ -194,7 +212,9 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:
                 _crear_tabla_trabajo(bd)
             if version == 3:
                 bd.execute("ALTER TABLE trabajo ADD COLUMN objetivo TEXT")
-            bd.execute("PRAGMA user_version = 4")
+            if version in (0, 1, 2, 3, 4):
+                _crear_tabla_gancho_grabado(bd)
+            bd.execute(f"PRAGMA user_version = {VERSION_BD}")
             bd.execute("COMMIT")
         except Exception:
             if bd.in_transaction:
@@ -300,3 +320,37 @@ def estados(
                 red,
             )
     return resultado
+
+
+def marcar_gancho_grabado(
+    bd: sqlite3.Connection,
+    curso: str,
+    numero: int,
+    gancho: str,
+    grabado: bool,
+    fecha: str,
+) -> None:
+    with bd:
+        if grabado:
+            bd.execute(
+                """
+                INSERT INTO gancho_grabado (curso, numero, gancho, fecha)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (curso, numero, gancho) DO NOTHING
+                """,
+                (curso, numero, gancho, fecha),
+            )
+        else:
+            bd.execute(
+                "DELETE FROM gancho_grabado WHERE curso = ? AND numero = ? AND gancho = ?",
+                (curso, numero, gancho),
+            )
+
+
+def ganchos_grabados(bd: sqlite3.Connection, curso: str) -> set[tuple[int, str]]:
+    return {
+        (numero, gancho)
+        for numero, gancho in bd.execute(
+            "SELECT numero, gancho FROM gancho_grabado WHERE curso = ?", (curso,)
+        )
+    }
