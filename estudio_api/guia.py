@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from estudio_api.config import Config
@@ -29,6 +30,16 @@ NOMBRES_RED: dict[Red, str] = {
 TIMEOUT_CONVERSOR_S = 60
 TIMEOUT_RECOGIDA_S = 5
 AVISO_HTML = "No se ha podido regenerar la guía HTML"
+
+
+@dataclass(frozen=True)
+class ParametrosRegeneracionGuia:
+    carpeta: Path
+    numero: int
+    curso_nombre: str
+    publicacion: Publicacion
+    portadas: dict[str, str]
+    titulos_piezas: dict[str, str] | None = None
 
 
 def _bloque_codigo(contenido: str) -> str:
@@ -174,42 +185,33 @@ def rutas_regeneracion(
     return publicar, markdown, html, script
 
 
-def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913 - deuda congelada
-    config: Config,
-    carpeta: Path,
-    numero: int,
-    curso_nombre: str,
-    publicacion: Publicacion,
-    portadas: dict[str, str],
-    titulos_piezas: dict[str, str] | None = None,
+def _escribir_markdown(
+    markdown: Path,
+    parametros: ParametrosRegeneracionGuia,
 ) -> str | None:
-    rutas = rutas_regeneracion(config, carpeta, numero)
-    if rutas is None:
-        return "No se ha podido regenerar la guía"
-    publicar, markdown, html, script = rutas
     try:
         escribir_atomico(
             markdown,
             generar_guia(
-                publicacion,
-                curso_nombre,
-                numero,
-                portadas,
-                titulos_piezas,
+                parametros.publicacion,
+                parametros.curso_nombre,
+                parametros.numero,
+                parametros.portadas,
+                parametros.titulos_piezas,
             ),
         )
     except OSError:
         return "No se ha podido regenerar la guía Markdown"
-    if not script.is_file():
-        return AVISO_HTML
+    return None
 
-    descriptor, nombre_temporal = tempfile.mkstemp(
-        dir=publicar,
-        prefix=f".{html.name}.",
-        suffix=".tmp",
-    )
-    os.close(descriptor)
-    temporal = Path(nombre_temporal)
+
+def _argumentos_conversor(
+    publicar: Path,
+    markdown: Path,
+    temporal: Path,
+    script: Path,
+    portadas: dict[str, str],
+) -> list[str]:
     argumentos = [
         sys.executable,
         "-I",
@@ -227,11 +229,39 @@ def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913 - deuda congelada
             portada_absoluta = None
         if portada_absoluta is not None and portada_absoluta.is_file():
             argumentos.append(str(portada_absoluta))
-    entorno = {
+    return argumentos
+
+
+def _entorno_conversor() -> dict[str, str]:
+    return {
         "PATH": os.environ.get("PATH", os.defpath),
         "HOME": os.environ.get("HOME", str(Path.home())),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
+
+
+def _recoger_conversor(proceso: subprocess.Popen[bytes]) -> bool:
+    try:
+        proceso.communicate(timeout=TIMEOUT_CONVERSOR_S)
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError):
+            os.killpg(proceso.pid, signal.SIGKILL)
+        try:
+            proceso.communicate(timeout=TIMEOUT_RECOGIDA_S)
+        except subprocess.TimeoutExpired:
+            for tuberia in (proceso.stdout, proceso.stderr):
+                if tuberia is not None:
+                    with suppress(OSError):
+                        tuberia.close()
+        return False
+    return True
+
+
+def _ejecutar_conversor(
+    argumentos: list[str],
+    publicar: Path,
+    entorno: dict[str, str],
+) -> bool:
     try:
         proceso = subprocess.Popen(
             argumentos,
@@ -242,26 +272,69 @@ def regenerar_guia(  # noqa: C901, PLR0911, PLR0912, PLR0913 - deuda congelada
             start_new_session=True,
             env=entorno,
         )
-        try:
-            proceso.communicate(timeout=TIMEOUT_CONVERSOR_S)
-        except subprocess.TimeoutExpired:
-            with suppress(ProcessLookupError):
-                os.killpg(proceso.pid, signal.SIGKILL)
-            try:
-                proceso.communicate(timeout=TIMEOUT_RECOGIDA_S)
-            except subprocess.TimeoutExpired:
-                for tuberia in (proceso.stdout, proceso.stderr):
-                    if tuberia is not None:
-                        with suppress(OSError):
-                            tuberia.close()
-            return AVISO_HTML
-        if proceso.returncode != 0:
-            return AVISO_HTML
+        return _recoger_conversor(proceso) and proceso.returncode == 0
+    except OSError:
+        return False
+
+
+def _instalar_html(publicar: Path, html: Path, temporal: Path) -> bool:
+    try:
         if ruta_escritura_segura(publicar, html.name) != html:
-            return AVISO_HTML
+            return False
         reemplazar_atomico(html, temporal)
     except OSError:
-        return AVISO_HTML
+        return False
+    return True
+
+
+def _regenerar_html(
+    publicar: Path,
+    markdown: Path,
+    html: Path,
+    script: Path,
+    portadas: dict[str, str],
+) -> str | None:
+    descriptor, nombre_temporal = tempfile.mkstemp(
+        dir=publicar,
+        prefix=f".{html.name}.",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    temporal = Path(nombre_temporal)
+    argumentos = _argumentos_conversor(
+        publicar,
+        markdown,
+        temporal,
+        script,
+        portadas,
+    )
+    entorno = _entorno_conversor()
+    try:
+        if not _ejecutar_conversor(argumentos, publicar, entorno):
+            return AVISO_HTML
+        if not _instalar_html(publicar, html, temporal):
+            return AVISO_HTML
     finally:
         temporal.unlink(missing_ok=True)
     return None
+
+
+def regenerar_guia(
+    config: Config,
+    parametros: ParametrosRegeneracionGuia,
+) -> str | None:
+    rutas = rutas_regeneracion(config, parametros.carpeta, parametros.numero)
+    if rutas is None:
+        return "No se ha podido regenerar la guía"
+    publicar, markdown, html, script = rutas
+    if aviso := _escribir_markdown(markdown, parametros):
+        return aviso
+    if not script.is_file():
+        return AVISO_HTML
+    return _regenerar_html(
+        publicar,
+        markdown,
+        html,
+        script,
+        parametros.portadas,
+    )

@@ -159,6 +159,7 @@ def _copia_antes_de_migrar(
 
 
 VERSION_BD = 6
+_VERSIONES_MIGRABLES = (0, 1, 2, 3, 4, 5)
 
 
 def _permitir_tareas_sin_fecha(bd: sqlite3.Connection) -> None:
@@ -209,16 +210,56 @@ def _crear_tabla_gancho_grabado(bd: sqlite3.Connection) -> None:
     )
 
 
-def abrir_bd(ruta: Path) -> sqlite3.Connection:  # noqa: C901, PLR0912 - deuda congelada
+def _leer_version(bd: sqlite3.Connection) -> int:
+    return bd.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _validar_version(version: int) -> None:
+    if version not in _VERSIONES_MIGRABLES:
+        raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
+
+
+def _aplicar_migraciones(bd: sqlite3.Connection, version: int) -> None:
+    if version == 0:
+        _crear_tablas_fase_2(bd)
+    if version in (0, 1):
+        _crear_tablas_tareas(bd)
+    if version in (0, 1, 2):
+        _crear_tabla_trabajo(bd)
+    if version == 3:
+        bd.execute("ALTER TABLE trabajo ADD COLUMN objetivo TEXT")
+    if version in (0, 1, 2, 3, 4):
+        _crear_tabla_gancho_grabado(bd)
+    if version in (2, 3, 4, 5):
+        _permitir_tareas_sin_fecha(bd)
+    bd.execute(f"PRAGMA user_version = {VERSION_BD}")
+
+
+def _migrar_con_cerrojo(bd: sqlite3.Connection) -> None:
+    try:
+        bd.execute("BEGIN IMMEDIATE")
+        version = _leer_version(bd)
+        if version == VERSION_BD:
+            bd.execute("COMMIT")
+            return
+        _validar_version(version)
+        _aplicar_migraciones(bd, version)
+        bd.execute("COMMIT")
+    except Exception:
+        if bd.in_transaction:
+            bd.execute("ROLLBACK")
+        raise
+
+
+def abrir_bd(ruta: Path) -> sqlite3.Connection:
     ruta.parent.mkdir(parents=True, exist_ok=True)
     bd = sqlite3.connect(ruta)
     try:
         bd.execute("PRAGMA foreign_keys = ON")
-        version = bd.execute("PRAGMA user_version").fetchone()[0]
+        version = _leer_version(bd)
         if version == VERSION_BD:
             return bd
-        if version not in (0, 1, 2, 3, 4, 5):
-            raise RuntimeError(f"Versión de la base de datos no soportada: {version}")
+        _validar_version(version)
 
         if version in (1, 2, 3, 4, 5):
             # Antes del cerrojo de escritura: backup() no puede leer una base bloqueada
@@ -228,33 +269,7 @@ def abrir_bd(ruta: Path) -> sqlite3.Connection:  # noqa: C901, PLR0912 - deuda c
         aislamiento_anterior = bd.isolation_level
         bd.isolation_level = None
         try:
-            bd.execute("BEGIN IMMEDIATE")
-            version = bd.execute("PRAGMA user_version").fetchone()[0]
-            if version == VERSION_BD:
-                bd.execute("COMMIT")
-                return bd
-            if version not in (0, 1, 2, 3, 4, 5):
-                raise RuntimeError(
-                    f"Versión de la base de datos no soportada: {version}"
-                )
-            if version == 0:
-                _crear_tablas_fase_2(bd)
-            if version in (0, 1):
-                _crear_tablas_tareas(bd)
-            if version in (0, 1, 2):
-                _crear_tabla_trabajo(bd)
-            if version == 3:
-                bd.execute("ALTER TABLE trabajo ADD COLUMN objetivo TEXT")
-            if version in (0, 1, 2, 3, 4):
-                _crear_tabla_gancho_grabado(bd)
-            if version in (2, 3, 4, 5):
-                _permitir_tareas_sin_fecha(bd)
-            bd.execute(f"PRAGMA user_version = {VERSION_BD}")
-            bd.execute("COMMIT")
-        except Exception:
-            if bd.in_transaction:
-                bd.execute("ROLLBACK")
-            raise
+            _migrar_con_cerrojo(bd)
         finally:
             bd.isolation_level = aislamiento_anterior
     except Exception:
