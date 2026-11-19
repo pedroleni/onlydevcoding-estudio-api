@@ -227,7 +227,7 @@ def test_publicado_por_red_exige_todas_las_piezas_previstas():
     }
 
 
-def test_publicado_por_red_no_cuenta_redes_vacias():
+def test_publicado_por_red_no_cuenta_redes_vacias_sin_publicar():
     publicacion = Publicacion.model_validate(
         {
             "version": 1,
@@ -235,12 +235,41 @@ def test_publicado_por_red_no_cuenta_redes_vacias():
         }
     )
 
-    resultado = publicado_por_red(
-        publicacion,
-        {("leccion", "tiktok"): EstadoRed(estado="publicado")},
+    assert publicado_por_red(publicacion, {})["tiktok"] is False
+    assert (
+        publicado_por_red(
+            publicacion, {("leccion", "tiktok"): EstadoRed(estado="pendiente")}
+        )["tiktok"]
+        is False
     )
 
-    assert resultado["tiktok"] is False
+
+def test_lo_subido_sin_textos_cuenta_como_previsto_y_publicado():
+    # Los shorts subidos a LinkedIn sin textos en publicacion.json también cuentan.
+    publicacion = Publicacion.model_validate(
+        {
+            "version": 1,
+            "piezas": {
+                "leccion": {"redes": {"linkedin": {"texto": "Texto ficticio"}}},
+                "short-1": {"redes": {"youtube": {"descripcion": "Texto ficticio"}}},
+                "short-2": {"redes": {"youtube": {"descripcion": "Texto ficticio"}}},
+            },
+        }
+    )
+    estados = {
+        ("leccion", "linkedin"): EstadoRed(estado="publicado"),
+        ("short-1", "linkedin"): EstadoRed(estado="publicado"),
+        ("short-2", "linkedin"): EstadoRed(
+            estado="programado", fecha="2026-01-01T10:00:00+01:00"
+        ),
+    }
+
+    avance = avance_por_red(publicacion, estados)["linkedin"]
+    cortos = avance_por_grupo(publicacion, estados)["cortos"]["linkedin"]
+
+    assert (avance.hechas, avance.total) == (2, 3)
+    assert (cortos.hechas, cortos.total) == (1, 2)
+    assert publicado_por_red(publicacion, estados)["linkedin"] is False
 
 
 def test_avance_por_red_cuenta_piezas_publicadas_de_las_previstas():

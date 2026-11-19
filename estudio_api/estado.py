@@ -20,7 +20,10 @@ REDES = ("youtube", "instagram", "tiktok", "linkedin")
 
 def _piezas_previstas(
     publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed] | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
+    """Piezas que se publican en cada red: las que tienen textos y, aunque no los
+    tengan, las que ya se programaron o se subieron (se publicaron sin textos)."""
     previstas: dict[str, list[tuple[str, str]]] = {red: [] for red in REDES}
     if publicacion is None:
         previstas["youtube"].append(("leccion", "youtube"))
@@ -31,6 +34,13 @@ def _piezas_previstas(
             for red, textos in datos.redes.items():
                 if not textos_red_vacios(textos):
                     previstas[red].append((pieza, red))
+    for (pieza, red), estado in (estados or {}).items():
+        if (
+            red in previstas
+            and estado.estado != "pendiente"
+            and (pieza, red) not in previstas[red]
+        ):
+            previstas[red].append((pieza, red))
     return previstas
 
 
@@ -47,7 +57,7 @@ def publicado_por_red(
 ) -> dict[str, bool]:
     return {
         red: bool(pares) and all(_publicada(estados, par) for par in pares)
-        for red, pares in _piezas_previstas(publicacion).items()
+        for red, pares in _piezas_previstas(publicacion, estados).items()
     }
 
 
@@ -61,7 +71,7 @@ def avance_por_red(
             hechas=sum(_publicada(estados, par) for par in pares),
             total=len(pares),
         )
-        for red, pares in _piezas_previstas(publicacion).items()
+        for red, pares in _piezas_previstas(publicacion, estados).items()
     }
 
 
@@ -73,7 +83,7 @@ def avance_por_grupo(
 
     En Instagram y TikTok no va la lección, solo los cortos: así se ve qué es cada cosa.
     """
-    previstas = _piezas_previstas(publicacion)
+    previstas = _piezas_previstas(publicacion, estados)
     grupos: dict[str, dict[str, Avance]] = {}
     for grupo, es_del_grupo in (
         ("leccion", lambda pieza: pieza == "leccion"),
