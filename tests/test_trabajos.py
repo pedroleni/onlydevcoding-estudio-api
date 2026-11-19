@@ -1925,3 +1925,155 @@ def test_codigo_de_salida_con_fallo_al_borrar_temporal_conserva_su_mensaje(
     terminado = _leer(ruta_bd, trabajo.id)
     assert terminado.estado == "error"
     assert terminado.error == "La herramienta terminó con el código 3"
+
+
+# --- Ramas de ``_ejecutar`` fijadas antes de partirla en fases ---
+
+
+def _lanzar_en_pausa(ruta_bd, plan, monkeypatch):
+    """Lanza ``plan`` y detiene su hilo justo antes de ``_ejecutar``."""
+    entrada = threading.Event()
+    continuar = threading.Event()
+    ejecutar_real = modulo_trabajos._ejecutar
+
+    def ejecutar_demorado(*args):
+        entrada.set()
+        continuar.wait(5)
+        ejecutar_real(*args)
+
+    monkeypatch.setattr(modulo_trabajos, "_ejecutar", ejecutar_demorado)
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    assert entrada.wait(5)
+    return trabajo, continuar
+
+
+@pytest.mark.parametrize(
+    ("motivo", "estado", "error"),
+    [("cancelado", "cancelado", "Cancelado"), ("apagado", "en_marcha", None)],
+)
+def test_motivo_antes_de_arrancar_borra_el_temporal_sin_lanzar(
+    tmp_path, monkeypatch, motivo, estado, error
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".salida.generando.mp4"
+    temporal.write_bytes(b"resto de otro intento")
+    lanzados = []
+    monkeypatch.setattr(
+        modulo_trabajos.subprocess,
+        "Popen",
+        lambda *args, **kwargs: lanzados.append(args),
+    )
+    plan = PlanTrabajo(
+        accion="demorado",
+        objetivo=None,
+        comando=[sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=tmp_path / "salida.mp4",
+    )
+    trabajo, continuar = _lanzar_en_pausa(ruta_bd, plan, monkeypatch)
+    with modulo_trabajos._BLOQUEO:
+        en_curso = modulo_trabajos._EN_CURSO[trabajo.id]
+    with en_curso.cerrojo:
+        en_curso.motivo = motivo
+    continuar.set()
+    esperar(trabajo.id, 5)
+
+    final = _leer(ruta_bd, trabajo.id)
+    assert lanzados == []
+    assert not temporal.exists()
+    # Con ``apagado`` lo cierra el apagado de la API, no el hilo del trabajo.
+    assert final.estado == estado
+    assert final.error == error
+    assert final.progreso == 0.0
+    assert _registro(ruta_bd, trabajo.id) == []
+
+
+def test_oserror_al_lanzar_borra_el_temporal_y_deja_error_de_arranque(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".salida.generando.mp4"
+    temporal.write_bytes(b"resto de otro intento")
+
+    def popen_fallido(*args, **kwargs):
+        raise OSError("fallo de arranque ficticio")
+
+    monkeypatch.setattr(modulo_trabajos.subprocess, "Popen", popen_fallido)
+    trabajo = lanzar(
+        ruta_bd,
+        None,
+        None,
+        PlanTrabajo(
+            accion="sin-arranque",
+            objetivo=None,
+            comando=[sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            temporal=temporal,
+            destino=tmp_path / "salida.mp4",
+            mensajes=MENSAJES_PREVIA,
+        ),
+    )
+    esperar(trabajo.id, 5)
+
+    fallido = _leer(ruta_bd, trabajo.id)
+    assert fallido.estado == "error"
+    assert fallido.error == "No se pudo arrancar el render"
+    assert fallido.progreso == 0.0
+    assert _registro(ruta_bd, trabajo.id) == []
+    assert not temporal.exists()
+    assert not (tmp_path / "salida.mp4").exists()
+
+
+def test_fallo_inesperado_al_leer_conserva_avance_mata_el_grupo_y_borra(
+    tmp_path, monkeypatch
+):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    temporal = tmp_path / ".salida.generando.mp4"
+    destino = tmp_path / "salida.mp4"
+    pid_ruta = tmp_path / "pid"
+    incorporar_real = modulo_trabajos._incorporar_linea
+
+    def incorporar_con_fallo(linea, *args, **kwargs):
+        if linea == "boom":
+            raise RuntimeError("fallo inesperado ficticio")
+        return incorporar_real(linea, *args, **kwargs)
+
+    monkeypatch.setattr(modulo_trabajos, "_incorporar_linea", incorporar_con_fallo)
+    plan = PlanTrabajo(
+        accion="render-leccion",
+        objetivo=None,
+        comando=[
+            sys.executable,
+            "-c",
+            (
+                "import os,pathlib,sys,time\n"
+                "pathlib.Path(sys.argv[2]).write_bytes(b'parcial')\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                "print('1/4', flush=True)\n"
+                "print('boom', flush=True)\n"
+                "time.sleep(60)\n"
+            ),
+            str(pid_ruta),
+            str(temporal),
+        ],
+        cwd=tmp_path,
+        temporal=temporal,
+        destino=destino,
+    )
+
+    trabajo = lanzar(ruta_bd, None, None, plan)
+    esperar(trabajo.id, 10)
+    pid = int(pid_ruta.read_text())
+    try:
+        fallido = _leer(ruta_bd, trabajo.id)
+        assert fallido.estado == "error"
+        assert fallido.error == "No se pudo guardar el resultado"
+        assert fallido.progreso == 0.25
+        assert _registro(ruta_bd, trabajo.id) == ["1/4"]
+        assert _esperar_que_mueran([pid])
+        assert not temporal.exists()
+        assert not destino.exists()
+        assert trabajo.id not in modulo_trabajos._HILOS
+    finally:
+        _matar_si_quedan([pid])

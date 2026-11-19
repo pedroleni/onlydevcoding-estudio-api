@@ -936,3 +936,118 @@ def test_fallo_de_ruta_al_limpiar_analisis_no_impide_responder(
 
     assert resultado.colocadas[0].destino == "E17"
     assert "No se pudo limpiar el análisis de una toma" in caplog.text
+
+
+def _espiar_pasos(cfg, monkeypatch) -> list[tuple[str, str]]:
+    """Apunta, en orden, cada paso de la colocación que toca el disco."""
+    pasos: list[tuple[str, str]] = []
+
+    def relativa(ruta) -> str:
+        ruta = Path(ruta)
+        for raiz in (cfg.cursos_dir, cfg.estudio_dir):
+            if ruta.is_relative_to(raiz):
+                return ruta.relative_to(raiz).as_posix()
+        return str(ruta)
+
+    def espia(nombre, real, *, ruta_de):
+        def envoltorio(*args, **kwargs):
+            pasos.append((nombre, relativa(ruta_de(*args))))
+            return real(*args, **kwargs)
+
+        return envoltorio
+
+    for nombre, atributo, ruta_de in (
+        ("carpeta", "_crear_directorios_reales", lambda ruta, *_: ruta),
+        ("copiar", "_preparar_copia", lambda salida, *_: salida.destino),
+        ("instalar", "instalar_archivando", lambda _temporal, destino: destino),
+        ("json", "escribir_json_versionado", lambda ruta, *_: ruta),
+    ):
+        real = getattr(modulo_colocar, atributo)
+        monkeypatch.setattr(
+            modulo_colocar, atributo, espia(nombre, real, ruta_de=ruta_de)
+        )
+    rename_real = modulo_colocar.os.rename
+    monkeypatch.setattr(
+        modulo_colocar.os,
+        "rename",
+        espia("mover", rename_real, ruta_de=lambda _origen, destino: destino),
+    )
+    return pasos
+
+
+def test_coloca_en_orden_carpetas_copias_originales_instalaciones_y_json(
+    cfg, monkeypatch
+):
+    vertical = "Facetune0A1B2C3D-demo.MOV"
+    _preparar(cfg, [_toma("toma-a.mov"), _toma(vertical, "vertical")])
+    pasos = _espiar_pasos(cfg, monkeypatch)
+
+    _colocar(
+        cfg,
+        [
+            Asignacion(archivo="toma-a.mov", destino="E17"),
+            Asignacion(archivo=vertical, destino="S2"),
+        ],
+    )
+
+    videos = "REACT/04-importar-y-exportar/grabaciones/videos"
+    assert pasos == [
+        ("carpeta", videos),
+        ("carpeta", "public/grabaciones/react-04"),
+        ("carpeta", "lecciones/tomas/react-04"),
+        ("carpeta", "public/shorts/l4/tomas/original"),
+        ("carpeta", "public/shorts/l4/tomas"),
+        ("carpeta", "shorts/l4/tomas"),
+        ("carpeta", "shorts/l4/tomas"),
+        ("carpeta", "shorts/l4"),
+        ("copiar", "public/grabaciones/react-04/E17.mov"),
+        ("copiar", "lecciones/tomas/react-04/E17-camara.json"),
+        ("copiar", "public/shorts/l4/tomas/original/0A1B2C3D.mov"),
+        ("copiar", "public/shorts/l4/tomas/0A1B2C3D.mov"),
+        ("copiar", "shorts/l4/tomas/0A1B2C3D.json"),
+        ("copiar", "shorts/l4/tomas/0A1B2C3D.wav"),
+        ("mover", f"{videos}/toma-a.mov"),
+        ("mover", f"{videos}/{vertical}"),
+        ("instalar", "public/grabaciones/react-04/E17.mov"),
+        ("instalar", "lecciones/tomas/react-04/E17-camara.json"),
+        ("instalar", "public/shorts/l4/tomas/original/0A1B2C3D.mov"),
+        ("instalar", "public/shorts/l4/tomas/0A1B2C3D.mov"),
+        ("instalar", "shorts/l4/tomas/0A1B2C3D.json"),
+        ("instalar", "shorts/l4/tomas/0A1B2C3D.wav"),
+        ("json", "lecciones/react-04.json"),
+        ("json", "shorts/l4/shorts.json"),
+    ]
+
+
+def test_fallo_al_mover_el_segundo_original_devuelve_el_primero(cfg, monkeypatch):
+    vertical = "Facetune0A1B2C3D-demo.MOV"
+    _, entregas = _preparar(cfg, [_toma("toma-a.mov"), _toma(vertical, "vertical")])
+    antes = _huella_arbol(cfg.cursos_dir, cfg.estudio_dir)
+    rename_real = modulo_colocar.os.rename
+
+    def fallar_segundo(origen, destino, *args, **kwargs):
+        if Path(origen).name == vertical and Path(destino).parent.name == "videos":
+            raise OSError("fallo simulado al mover")
+        return rename_real(origen, destino, *args, **kwargs)
+
+    monkeypatch.setattr(modulo_colocar.os, "rename", fallar_segundo)
+    asignaciones = [
+        Asignacion(archivo="toma-a.mov", destino="E17"),
+        Asignacion(archivo=vertical, destino="S2"),
+    ]
+
+    with pytest.raises(ColocacionNoValida) as captura:
+        _colocar(cfg, asignaciones)
+
+    assert captura.value.estado_http == 503
+    assert captura.value.mensaje == "No se han podido colocar las tomas"
+    assert (entregas / "toma-a.mov").read_bytes() == b"video:toma-a.mov"
+    assert not (entregas.parent / "videos").exists()
+    assert not list(cfg.cursos_dir.rglob("*.colocando*"))
+    assert not list(cfg.estudio_dir.rglob("*.colocando*"))
+    assert _huella_arbol(cfg.cursos_dir, cfg.estudio_dir) == antes
+
+    monkeypatch.setattr(modulo_colocar.os, "rename", rename_real)
+    resultado = _colocar(cfg, asignaciones)
+
+    assert [toma.archivo for toma in resultado.colocadas] == ["toma-a.mov", vertical]

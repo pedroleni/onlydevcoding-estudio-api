@@ -524,233 +524,252 @@ def _guardar_copia(plan: PlanTrabajo) -> None:
         raise
 
 
-def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915 - deuda congelada
+@dataclass
+class _Ejecucion:
+    """Un trabajo mientras corre en su hilo: lo que acumula y cómo cerrarlo.
+
+    El avance y el registro viven aquí, y no en variables de cada fase, para
+    que un fallo inesperado en cualquier punto guarde lo acumulado hasta él.
+    """
+
+    bd_ruta: Path
+    trabajo_id: int
+    plan: PlanTrabajo
+    en_curso: _EnCurso
+    registro: list[str] = field(default_factory=list)
+    progreso: float = 0.0
+    proceso: subprocess.Popen[bytes] | None = None
+    temporizador: threading.Timer | None = None
+
+    def borrar_temporal(self) -> None:
+        _borrar_temporal_sin_fallar(self.plan.temporal, self.trabajo_id)
+
+    def finalizar(
+        self, estado: Literal["hecho", "error", "cancelado"], error: str | None
+    ) -> None:
+        _finalizar_con_reintento(
+            self.bd_ruta,
+            self.trabajo_id,
+            estado,
+            self.progreso,
+            self.registro,
+            error,
+        )
+
+
+@dataclass
+class _LineaPendiente:
+    """Texto de la salida que aún no ha terminado en ``\\r`` ni en ``\\n``."""
+
+    texto: str = ""
+    reescribir: bool = False
+
+
+def _arrancar_proceso(ejecucion: _Ejecucion) -> subprocess.Popen[bytes] | None:
+    """Lanza el proceso del plan; ``None`` si el trabajo ya quedó cerrado."""
+    en_curso = ejecucion.en_curso
+    plan = ejecucion.plan
+    with en_curso.cerrojo:
+        if en_curso.motivo is not None:
+            # Cancelar o apagar pudo adelantarse al arranque del proceso.
+            motivo_inicial = en_curso.motivo
+            ejecucion.borrar_temporal()
+            if motivo_inicial == "cancelado":
+                ejecucion.finalizar("cancelado", ERROR_CANCELADO)
+            return None
+        try:
+            proceso = subprocess.Popen(
+                list(plan.comando),
+                cwd=plan.cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                start_new_session=True,
+                env=_entorno_render() | dict(plan.entorno),
+            )
+        except OSError:
+            en_curso.motivo = "fin"
+            logger.exception("No se pudo arrancar el trabajo %s", ejecucion.trabajo_id)
+            ejecucion.borrar_temporal()
+            ejecucion.finalizar("error", plan.mensajes.arranque)
+            return None
+        ejecucion.proceso = proceso
+        en_curso.proceso = proceso
+    return proceso
+
+
+def _arrancar_temporizador(ejecucion: _Ejecucion) -> threading.Timer:
+    ejecucion.temporizador = threading.Timer(
+        ejecucion.plan.tiempo_maximo,
+        _vencer_tiempo,
+        args=(ejecucion.en_curso, ejecucion.trabajo_id),
+    )
+    ejecucion.temporizador.daemon = True
+    ejecucion.temporizador.start()
+    return ejecucion.temporizador
+
+
+def _incorporar_pendiente(ejecucion: _Ejecucion, pendiente: _LineaPendiente) -> None:
+    ejecucion.progreso = _incorporar_linea(
+        pendiente.texto,
+        ejecucion.registro,
+        ejecucion.progreso,
+        patron_progreso=ejecucion.plan.patron_progreso,
+        reescribir=pendiente.reescribir,
+    )
+
+
+def _incorporar_texto(
+    ejecucion: _Ejecucion, pendiente: _LineaPendiente, texto: str
+) -> None:
+    for caracter in texto:
+        if caracter == "\r":
+            tenia_pendiente = bool(pendiente.texto)
+            _incorporar_pendiente(ejecucion, pendiente)
+            pendiente.texto = ""
+            pendiente.reescribir = pendiente.reescribir or tenia_pendiente
+        elif caracter == "\n":
+            _incorporar_pendiente(ejecucion, pendiente)
+            pendiente.texto = ""
+            pendiente.reescribir = False
+        elif len(pendiente.texto) < 500:
+            pendiente.texto += caracter
+
+
+def _leer_salida(ejecucion: _Ejecucion, proceso: subprocess.Popen[bytes]) -> None:
+    """Lee la salida hasta que se cierra y guarda el avance como mucho cada segundo."""
+    assert proceso.stdout is not None
+    pendiente = _LineaPendiente()
+    ultima_escritura = monotonic()
+    decodificador = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    try:
+        while trozo := proceso.stdout.read1(4096):
+            _incorporar_texto(ejecucion, pendiente, decodificador.decode(trozo))
+            ahora = monotonic()
+            if ahora - ultima_escritura >= 1:
+                try:
+                    _guardar_avance(
+                        ejecucion.bd_ruta,
+                        ejecucion.trabajo_id,
+                        ejecucion.progreso,
+                        ejecucion.registro,
+                    )
+                except Exception:  # noqa: BLE001 -- el avance no debe abortar el render
+                    logger.warning(
+                        "No se pudo guardar el avance del trabajo %s",
+                        ejecucion.trabajo_id,
+                    )
+                else:
+                    ultima_escritura = ahora
+        _incorporar_texto(ejecucion, pendiente, decodificador.decode(b"", final=True))
+    finally:
+        proceso.stdout.close()
+
+    if pendiente.texto:
+        _incorporar_pendiente(ejecucion, pendiente)
+
+
+def _fijar_motivo_final(
+    en_curso: _EnCurso,
+) -> Literal["tiempo", "apagado", "cancelado", "fin"]:
+    with en_curso.cerrojo:
+        if en_curso.motivo is None:
+            en_curso.motivo = "fin"
+        return en_curso.motivo
+
+
+def _cerrar_sin_resultado(
+    ejecucion: _Ejecucion,
+    proceso: subprocess.Popen[bytes],
+    temporizador: threading.Timer,
+    motivo: Literal["tiempo", "apagado", "cancelado", "fin"],
+    codigo: int,
+) -> None:
+    """Cierra un trabajo parado (apagado, tiempo, cancelado) o que terminó mal."""
+    if motivo == "apagado":
+        # El apagado ya ha marcado el trabajo como interrumpido.
+        ejecucion.borrar_temporal()
+        return
+    if motivo == "tiempo":
+        # Se espera a que el grupo muera antes de borrar lo que escribía.
+        temporizador.join()
+        ejecucion.borrar_temporal()
+        ejecucion.finalizar("error", ejecucion.plan.mensajes.tiempo)
+        return
+    if motivo == "cancelado":
+        # El líder puede haber muerto antes que un descendiente que no
+        # hereda stdout. No se borra ni se finaliza hasta parar el grupo.
+        _terminar_grupo(proceso)
+        ejecucion.borrar_temporal()
+        ejecucion.finalizar("cancelado", ERROR_CANCELADO)
+        return
+    ejecucion.borrar_temporal()
+    ejecucion.finalizar("error", ejecucion.plan.mensajes.codigo.format(codigo=codigo))
+
+
+def _instalar_y_finalizar(ejecucion: _Ejecucion) -> None:
+    plan = ejecucion.plan
+    trabajo_id = ejecucion.trabajo_id
+    try:
+        _instalar_resultado(plan, trabajo_id)
+        _guardar_copia(plan)
+    except OSError as error:
+        if plan.instalar == "sin_pisar" and isinstance(error, FileExistsError):
+            logger.warning("El destino del trabajo %s ya existe", trabajo_id)
+            mensaje = ERROR_SIN_PISAR
+        else:
+            logger.exception(
+                "No se pudo instalar el resultado del trabajo %s", trabajo_id
+            )
+            mensaje = plan.mensajes.guardado
+        ejecucion.borrar_temporal()
+        ejecucion.finalizar("error", mensaje)
+        return
+    ejecucion.finalizar("hecho", None)
+
+
+def _cerrar_tras_fallo_inesperado(ejecucion: _Ejecucion) -> None:
+    """Para el grupo si sigue vivo, borra el temporal y guarda cómo acaba."""
+    en_curso = ejecucion.en_curso
+    with en_curso.cerrojo:
+        motivo = en_curso.motivo
+        en_curso.motivo = en_curso.motivo or "fin"
+    proceso = ejecucion.proceso
+    if proceso is not None and (motivo == "cancelado" or proceso.poll() is None):
+        _terminar_grupo(proceso)
+        proceso.wait()
+    ejecucion.borrar_temporal()
+    if motivo == "cancelado":
+        ejecucion.finalizar("cancelado", ERROR_CANCELADO)
+    elif motivo != "apagado":
+        ejecucion.finalizar("error", ejecucion.plan.mensajes.guardado)
+
+
+def _ejecutar(bd_ruta: Path, trabajo_id: int, plan: PlanTrabajo) -> None:
     with _BLOQUEO:
         # ``lanzar`` lo registra siempre antes de arrancar el hilo.
         en_curso = _EN_CURSO[trabajo_id]
-    registro: list[str] = []
-    progreso = 0.0
-    proceso: subprocess.Popen[bytes] | None = None
-    temporizador: threading.Timer | None = None
+    ejecucion = _Ejecucion(bd_ruta, trabajo_id, plan, en_curso)
     try:
-        with en_curso.cerrojo:
-            if en_curso.motivo is not None:
-                # Cancelar o apagar pudo adelantarse al arranque del proceso.
-                motivo_inicial = en_curso.motivo
-                _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-                if motivo_inicial == "cancelado":
-                    _finalizar_con_reintento(
-                        bd_ruta,
-                        trabajo_id,
-                        "cancelado",
-                        progreso,
-                        registro,
-                        ERROR_CANCELADO,
-                    )
-                return
-            try:
-                proceso = subprocess.Popen(
-                    list(plan.comando),
-                    cwd=plan.cwd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    shell=False,
-                    start_new_session=True,
-                    env=_entorno_render() | dict(plan.entorno),
-                )
-            except OSError:
-                en_curso.motivo = "fin"
-                logger.exception("No se pudo arrancar el trabajo %s", trabajo_id)
-                _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-                _finalizar_con_reintento(
-                    bd_ruta,
-                    trabajo_id,
-                    "error",
-                    progreso,
-                    registro,
-                    plan.mensajes.arranque,
-                )
-                return
-            en_curso.proceso = proceso
-
-        temporizador = threading.Timer(
-            plan.tiempo_maximo,
-            _vencer_tiempo,
-            args=(en_curso, trabajo_id),
-        )
-        temporizador.daemon = True
-        temporizador.start()
-
-        assert proceso.stdout is not None
-        pendiente = ""
-        reescribir_pendiente = False
-        ultima_escritura = monotonic()
-        decodificador = codecs.getincrementaldecoder("utf-8")(errors="replace")
-
-        def incorporar_texto(texto: str) -> None:
-            nonlocal pendiente, progreso, reescribir_pendiente
-            for caracter in texto:
-                if caracter == "\r":
-                    tenia_pendiente = bool(pendiente)
-                    progreso = _incorporar_linea(
-                        pendiente,
-                        registro,
-                        progreso,
-                        patron_progreso=plan.patron_progreso,
-                        reescribir=reescribir_pendiente,
-                    )
-                    pendiente = ""
-                    reescribir_pendiente = reescribir_pendiente or tenia_pendiente
-                elif caracter == "\n":
-                    progreso = _incorporar_linea(
-                        pendiente,
-                        registro,
-                        progreso,
-                        patron_progreso=plan.patron_progreso,
-                        reescribir=reescribir_pendiente,
-                    )
-                    pendiente = ""
-                    reescribir_pendiente = False
-                elif len(pendiente) < 500:
-                    pendiente += caracter
-
-        try:
-            while trozo := proceso.stdout.read1(4096):
-                incorporar_texto(decodificador.decode(trozo))
-                ahora = monotonic()
-                if ahora - ultima_escritura >= 1:
-                    try:
-                        _guardar_avance(bd_ruta, trabajo_id, progreso, registro)
-                    except Exception:  # noqa: BLE001 -- el avance no debe abortar el render
-                        logger.warning(
-                            "No se pudo guardar el avance del trabajo %s",
-                            trabajo_id,
-                        )
-                    else:
-                        ultima_escritura = ahora
-            incorporar_texto(decodificador.decode(b"", final=True))
-        finally:
-            proceso.stdout.close()
-
-        if pendiente:
-            progreso = _incorporar_linea(
-                pendiente,
-                registro,
-                progreso,
-                patron_progreso=plan.patron_progreso,
-                reescribir=reescribir_pendiente,
-            )
+        proceso = _arrancar_proceso(ejecucion)
+        if proceso is None:
+            return
+        temporizador = _arrancar_temporizador(ejecucion)
+        _leer_salida(ejecucion, proceso)
         codigo = proceso.wait()
         temporizador.cancel()
-        with en_curso.cerrojo:
-            if en_curso.motivo is None:
-                en_curso.motivo = "fin"
-            motivo = en_curso.motivo
-
-        if motivo == "apagado":
-            # El apagado ya ha marcado el trabajo como interrumpido.
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
+        motivo = _fijar_motivo_final(en_curso)
+        if motivo != "fin" or codigo != 0:
+            _cerrar_sin_resultado(ejecucion, proceso, temporizador, motivo, codigo)
             return
-        if motivo == "tiempo":
-            # Se espera a que el grupo muera antes de borrar lo que escribía.
-            temporizador.join()
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "error",
-                progreso,
-                registro,
-                plan.mensajes.tiempo,
-            )
-            return
-        if motivo == "cancelado":
-            # El líder puede haber muerto antes que un descendiente que no
-            # hereda stdout. No se borra ni se finaliza hasta parar el grupo.
-            _terminar_grupo(proceso)
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "cancelado",
-                progreso,
-                registro,
-                ERROR_CANCELADO,
-            )
-            return
-        if codigo != 0:
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "error",
-                progreso,
-                registro,
-                plan.mensajes.codigo.format(codigo=codigo),
-            )
-            return
-
-        try:
-            _instalar_resultado(plan, trabajo_id)
-            _guardar_copia(plan)
-        except OSError as error:
-            if plan.instalar == "sin_pisar" and isinstance(error, FileExistsError):
-                logger.warning("El destino del trabajo %s ya existe", trabajo_id)
-                mensaje = ERROR_SIN_PISAR
-            else:
-                logger.exception(
-                    "No se pudo instalar el resultado del trabajo %s", trabajo_id
-                )
-                mensaje = plan.mensajes.guardado
-            _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "error",
-                progreso,
-                registro,
-                mensaje,
-            )
-            return
-        _finalizar_con_reintento(
-            bd_ruta,
-            trabajo_id,
-            "hecho",
-            progreso,
-            registro,
-            None,
-        )
+        _instalar_y_finalizar(ejecucion)
     except Exception:
         logger.exception("Fallo inesperado en el trabajo %s", trabajo_id)
-        with en_curso.cerrojo:
-            motivo = en_curso.motivo
-            en_curso.motivo = en_curso.motivo or "fin"
-        if proceso is not None and (motivo == "cancelado" or proceso.poll() is None):
-            _terminar_grupo(proceso)
-            proceso.wait()
-        _borrar_temporal_sin_fallar(plan.temporal, trabajo_id)
-        if motivo == "cancelado":
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "cancelado",
-                progreso,
-                registro,
-                ERROR_CANCELADO,
-            )
-        elif motivo != "apagado":
-            _finalizar_con_reintento(
-                bd_ruta,
-                trabajo_id,
-                "error",
-                progreso,
-                registro,
-                plan.mensajes.guardado,
-            )
+        _cerrar_tras_fallo_inesperado(ejecucion)
     finally:
-        if temporizador is not None:
-            temporizador.cancel()
+        if ejecucion.temporizador is not None:
+            ejecucion.temporizador.cancel()
 
 
 def _ejecutar_y_olvidar(
