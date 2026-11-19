@@ -151,6 +151,119 @@ def test_get_con_json_une_prioriza_y_ordena_las_piezas(cliente, cfg):
     assert vista["aviso"] is None
 
 
+def test_get_ignora_un_titulo_de_publicacion_vacio(cliente, cfg):
+    ruta = _carpeta_leccion(cfg) / "publicar" / "publicacion.json"
+    ruta.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "piezas": {"reel-salida": {"titulo": "   "}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    respuesta = cliente.get(RUTA_PUBLICACION)
+
+    assert respuesta.status_code == 200
+    assert _pieza(respuesta.json(), "reel-salida")["titulo"] == "Reel salida"
+
+
+def test_get_incluye_portadas_candidatas_de_las_subcarpetas(cliente, cfg):
+    publicar = _carpeta_leccion(cfg) / "publicar"
+    youtube = publicar / "1-youtube-leccion"
+    verticales = publicar / "2-shorts-y-reels"
+    opciones_miniatura = youtube / "opciones-miniatura"
+    opciones_short = verticales / "portadas-short-2-opciones"
+    poses_short = verticales / "portadas-short-2-poses"
+    verticales_short = verticales / "portadas-short-2-verticales"
+    opciones_miniatura.mkdir()
+    opciones_short.mkdir()
+    poses_short.mkdir()
+    verticales_short.mkdir()
+
+    (opciones_miniatura / "miniatura-B.webp").write_bytes(b"imagen")
+    (opciones_miniatura / "miniatura-A.png").write_bytes(b"imagen")
+    (opciones_short / "opcion-B.jpeg").write_bytes(b"imagen")
+    (opciones_short / "opcion-A.png").write_bytes(b"imagen")
+    (poses_short / "pose.webp").write_bytes(b"imagen")
+    (verticales_short / "vertical.jpg").write_bytes(b"imagen")
+    opciones_compartidas = verticales / "portadas-opciones"
+    (opciones_compartidas / "portada-reel-B.webp").write_bytes(b"imagen")
+    (opciones_compartidas / "portada-reel-A.png").write_bytes(b"imagen")
+    (opciones_compartidas / "portada-short-2-C.webp").write_bytes(b"imagen")
+    (opciones_compartidas / "portada-short-20-otra.png").write_bytes(b"imagen")
+
+    # No son candidatas: ocultas, extensiones ajenas, más de un nivel y descartadas.
+    (opciones_short / ".oculta.jpg").write_bytes(b"imagen")
+    (opciones_short / "notas.txt").write_text("texto", encoding="utf-8")
+    profunda = opciones_short / "otra-carpeta"
+    profunda.mkdir()
+    (profunda / "profunda.jpg").write_bytes(b"imagen")
+    (verticales / "descartadas" / "portada-short-2-descartada.jpg").write_bytes(
+        b"imagen"
+    )
+    (verticales / "anteriores" / "portada-reel-anterior.jpg").write_bytes(b"imagen")
+
+    respuesta = cliente.get(RUTA_PUBLICACION)
+
+    assert respuesta.status_code == 200
+    vista = respuesta.json()
+    leccion = _pieza(vista, "leccion")
+    reel = _pieza(vista, "reel-salida")
+    short = _pieza(vista, "short-2")
+    assert leccion["portadas"] == [
+        PORTADA_LECCION,
+        f"{PORTADA_LECCION.rsplit('/', 1)[0]}/opciones-miniatura/miniatura-A.png",
+        f"{PORTADA_LECCION.rsplit('/', 1)[0]}/opciones-miniatura/miniatura-B.webp",
+    ]
+    assert [ruta.rsplit("/", 1)[-1] for ruta in reel["portadas"]] == [
+        "portada-reel-A.png",
+        "portada-reel-B.webp",
+    ]
+    assert [ruta.rsplit("/", 1)[-1] for ruta in short["portadas"]] == [
+        "portada-short-2-principal.jpg",
+        "opcion-A.png",
+        "opcion-B.jpeg",
+        "pose.webp",
+        "vertical.jpg",
+        "portada-short-2-alternativa.jpg",
+        "portada-short-2-C.webp",
+    ]
+    assert not any(
+        nombre in ruta
+        for pieza in (leccion, reel, short)
+        for ruta in pieza["portadas"]
+        for nombre in ("oculta", "notas", "profunda", "descartada", "anterior")
+    )
+
+
+def test_elegir_una_portada_de_subcarpeta_funciona(cliente_con_token, cfg):
+    opciones = (
+        _carpeta_leccion(cfg)
+        / "publicar"
+        / "2-shorts-y-reels"
+        / "portadas-short-2-poses"
+    )
+    opciones.mkdir()
+    (opciones / "pose-elegida.webp").write_bytes(b"imagen")
+    ruta = (
+        "cursos/REACT/04-importar-y-exportar/publicar/2-shorts-y-reels/"
+        "portadas-short-2-poses/pose-elegida.webp"
+    )
+
+    respuesta = cliente_con_token.put(
+        f"{RUTA_PUBLICACION}/piezas/short-2/portada",
+        headers={"X-Estudio-Token": TOKEN},
+        json={"ruta": ruta},
+    )
+
+    assert respuesta.status_code == 200
+    assert _pieza(respuesta.json(), "short-2")["portada_elegida"] == ruta
+    recargada = cliente_con_token.get(RUTA_PUBLICACION)
+    assert _pieza(recargada.json(), "short-2")["portada_elegida"] == ruta
+
+
 def test_get_de_leccion_inexistente_da_404(cliente):
     assert cliente.get("/api/cursos/react/lecciones/99/publicacion").status_code == 404
 

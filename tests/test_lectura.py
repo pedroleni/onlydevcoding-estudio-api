@@ -10,6 +10,7 @@ from estudio_api.lectura import (
     leer_leccion,
     leer_lecciones,
 )
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 
 
@@ -257,6 +258,67 @@ def test_piezas_y_portadas(cfg):
     assert all(ruta.startswith("cursos/") for ruta in leccion.piezas[2].portadas)
 
 
+def test_piezas_usan_los_titulos_de_publicacion_por_id(cfg):
+    verticales = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "2-shorts-y-reels"
+    )
+    (verticales / "reel-salida.mp4").rename(verticales / "reel-nombre-sin-relacion.mp4")
+    publicacion = {
+        "version": 1,
+        "piezas": {
+            "reel-salida": {"titulo": "Reel de salida · Cinco pasos"},
+            "short-1": {"titulo": "Título de otra pieza"},
+            "short-2": {"titulo": "Short 2 · Tu navegador no entiende React"},
+        },
+    }
+    (verticales.parent / "publicacion.json").write_text(
+        json.dumps(publicacion, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    assert {pieza.id: pieza.titulo for pieza in leccion.piezas} == {
+        "leccion": "Importar componentes",
+        "reel-salida": "Reel de salida · Cinco pasos",
+        "short-2": "Short 2 · Tu navegador no entiende React",
+    }
+
+
+@pytest.mark.parametrize(
+    "contenido",
+    [
+        None,
+        {"version": 1, "piezas": {"reel-salida": {}}},
+        {"version": 1, "piezas": {"reel-salida": {"titulo": "   "}}},
+        "{json roto",
+    ],
+)
+def test_piezas_conservan_el_titulo_del_archivo_sin_titulo_publicado(cfg, contenido):
+    ruta = (
+        cfg.cursos_dir
+        / "REACT"
+        / "04-importar-y-exportar"
+        / "publicar"
+        / "publicacion.json"
+    )
+    if isinstance(contenido, dict):
+        ruta.write_text(json.dumps(contenido), encoding="utf-8")
+    elif contenido is not None:
+        ruta.write_text(contenido, encoding="utf-8")
+
+    leccion = leer_leccion(cfg, "react", 4)
+
+    assert leccion is not None
+    reel = next(pieza for pieza in leccion.piezas if pieza.id == "reel-salida")
+    assert reel.titulo == "Reel salida"
+
+
 def test_ids_estables_de_leccion_reel_unico_y_short(cfg):
     verticales = (
         cfg.cursos_dir
@@ -365,14 +427,49 @@ def test_portada_de_reel_anterior_se_ignora(cfg):
 
 
 def test_previas_ordenadas_por_numero_de_version(cfg):
+    directorio = cfg.cursos_dir / "REACT" / "04-importar-y-exportar" / "previa"
+    for ruta in directorio.iterdir():
+        ruta.unlink()
+    nombres = [
+        "previa-v2.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v23.mp4",
+    ]
+    for nombre in nombres:
+        (directorio / nombre).write_bytes(b"video ficticio")
+    (directorio / "previa-v5 x.mp4").write_bytes(b"nombre no valido")
+    (directorio / "previa-v5-..").mkdir()
+    (directorio / "previa-v5-.." / "x.mp4").write_bytes(b"ruta no valida")
+
     leccion = leer_leccion(cfg, "react", 4)
 
     assert leccion is not None
     assert [ruta.rsplit("/", 1)[-1] for ruta in leccion.previas] == [
-        "previa-v1.mp4",
         "previa-v2.mp4",
-        "previa-v10.mp4",
+        "previa-v5-estudio.mp4",
+        "previa-v5-pizarra.mp4",
+        "previa-v10-estudio-720p.mp4",
+        "previa-v13-camaras-reales.mp4",
+        "previa-v23.mp4",
     ]
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        "previa-v5-../x.mp4",
+        "previa-v5 x.mp4",
+    ],
+)
+def test_nombre_de_previa_no_valido_no_coincide(nombre):
+    assert PATRON_PREVIA.fullmatch(nombre) is None
+
+
+def test_nombre_de_previa_no_distingue_mayusculas():
+    assert PATRON_PREVIA.fullmatch("PREVIA-V13-CAMARAS-REALES.MP4") is not None
 
 
 def test_ignora_anteriores_y_descartadas(cfg):

@@ -17,13 +17,14 @@ from estudio_api.modelos import (
     LeccionResumen,
     Pieza,
 )
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 from estudio_api.tareas import cursos_app
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_CARPETA_LECCION = re.compile(r"^(\d{2,3})-(.+)$")
-PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 PATRON_SHORT = re.compile(r"^short-(\d+)(?:-.+)?\.mp4$", re.IGNORECASE)
+EXTENSIONES_IMAGEN = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 MAX_TAMANO_JSON = 5 * 1024 * 1024
 FPS_MINIMOS = 1.0
 FPS_MAXIMOS = 1000.0
@@ -511,6 +512,23 @@ def _archivos_directos(
     ]
 
 
+def _es_imagen(nombre: str) -> bool:
+    return Path(nombre).suffix.lower() in EXTENSIONES_IMAGEN
+
+
+def _imagenes_directas(
+    raiz: Path,
+    directorio: Path,
+    predicado: Callable[[str], bool] = lambda _nombre: True,
+) -> list[Path]:
+    imagenes = _archivos_directos(
+        raiz,
+        directorio,
+        lambda nombre: _es_imagen(nombre) and predicado(nombre),
+    )
+    return sorted(imagenes, key=lambda ruta: (ruta.name.casefold(), ruta.name))
+
+
 def _es_anterior(nombre: str) -> bool:
     return Path(nombre).stem.lower().endswith("-anterior")
 
@@ -538,11 +556,57 @@ def _previas(config: Config, carpeta: Path | None) -> list[str]:
         directorio,
         lambda nombre: PATRON_PREVIA.fullmatch(nombre) is not None,
     )
-    archivos.sort(key=lambda ruta: int(PATRON_PREVIA.fullmatch(ruta.name).group(1)))
+
+    def clave(ruta: Path) -> tuple[int, bool, str, str]:
+        coincidencia = PATRON_PREVIA.fullmatch(ruta.name)
+        assert coincidencia is not None
+        return (
+            int(coincidencia.group(1)),
+            coincidencia.group(2) is not None,
+            ruta.name.casefold(),
+            ruta.name,
+        )
+
+    archivos.sort(key=clave)
     return [_ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in archivos]
 
 
+def _titulos_publicados(config: Config, carpeta: Path | None) -> dict[str, str]:
+    """Títulos por id de pieza de publicar/publicacion.json; vacío si no es legible."""
+    if carpeta is None:
+        return {}
+    try:
+        relativa = carpeta.relative_to(config.cursos_dir.resolve())
+        ruta = ruta_segura(
+            config.cursos_dir, *relativa.parts, "publicar", "publicacion.json"
+        )
+    except ValueError:
+        return {}
+    datos = _leer_json(ruta)
+    piezas = datos.get("piezas") if datos is not None else None
+    if not isinstance(piezas, dict):
+        return {}
+    titulos: dict[str, str] = {}
+    for identificador, pieza in piezas.items():
+        titulo = pieza.get("titulo") if isinstance(pieza, dict) else None
+        if isinstance(titulo, str) and titulo.strip():
+            titulos[identificador] = titulo
+    return titulos
+
+
 def _piezas(
+    config: Config,
+    carpeta: Path | None,
+    titulo_leccion: str,
+) -> list[Pieza]:
+    titulos = _titulos_publicados(config, carpeta)
+    return [
+        pieza.model_copy(update={"titulo": titulos.get(pieza.id, pieza.titulo)})
+        for pieza in _piezas_de_disco(config, carpeta, titulo_leccion)
+    ]
+
+
+def _piezas_de_disco(
     config: Config,
     carpeta: Path | None,
     titulo_leccion: str,
@@ -576,15 +640,23 @@ def _piezas(
     )
     if videos_leccion:
         video_leccion = _ruta_publica(config.cursos_dir, "cursos", videos_leccion[0])
-    miniaturas = _archivos_directos(
+    miniaturas = _imagenes_directas(
         config.cursos_dir,
         youtube,
         lambda nombre: (
-            nombre.lower().startswith("miniatura-")
-            and nombre.lower().endswith(".jpg")
-            and not _es_anterior(nombre)
+            nombre.lower().startswith("miniatura-") and not _es_anterior(nombre)
         ),
     )
+    try:
+        opciones_miniatura = _subruta(
+            config.cursos_dir,
+            youtube,
+            "opciones-miniatura",
+        )
+    except ValueError:
+        opciones_miniatura = youtube
+    if opciones_miniatura != youtube:
+        miniaturas.extend(_imagenes_directas(config.cursos_dir, opciones_miniatura))
     portadas_leccion = [
         _ruta_publica(config.cursos_dir, "cursos", ruta) for ruta in miniaturas
     ]
@@ -607,15 +679,30 @@ def _piezas(
             and not _es_anterior(nombre)
         ),
     )
-    portadas_reels = _archivos_directos(
+    portadas_reels = _imagenes_directas(
         config.cursos_dir,
         verticales,
         lambda nombre: (
             nombre.lower().startswith("portada-reel-")
-            and nombre.lower().endswith(".jpg")
             and "-anterior" not in Path(nombre).stem.lower()
         ),
     )
+    try:
+        opciones_compartidas = _subruta(
+            config.cursos_dir,
+            verticales,
+            "portadas-opciones",
+        )
+    except ValueError:
+        opciones_compartidas = verticales
+    if opciones_compartidas != verticales:
+        portadas_reels.extend(
+            _imagenes_directas(
+                config.cursos_dir,
+                opciones_compartidas,
+                lambda nombre: nombre.lower().startswith("portada-reel"),
+            )
+        )
     portadas_por_reel: dict[Path, list[Path]] = {reel: [] for reel in reels}
     if len(reels) == 1:
         portadas_por_reel[reels[0]] = portadas_reels
@@ -656,35 +743,31 @@ def _piezas(
         shorts.append((int(coincidencia.group(1)), ruta))
     shorts.sort(key=lambda elemento: (elemento[0], elemento[1].name))
 
-    try:
-        opciones = _subruta(
-            config.cursos_dir,
-            verticales,
-            "portadas-opciones",
-        )
-    except ValueError:
-        opciones = verticales
     for numero, ruta in shorts:
         prefijo = f"portada-short-{numero}-"
-        portadas = _archivos_directos(
+        portadas = _imagenes_directas(
             config.cursos_dir,
             verticales,
             lambda nombre, prefijo=prefijo: (
-                nombre.lower().startswith(prefijo)
-                and nombre.lower().endswith(".jpg")
-                and not _es_anterior(nombre)
+                nombre.lower().startswith(prefijo) and not _es_anterior(nombre)
             ),
         )
-        if opciones != verticales:
-            portadas.extend(
-                _archivos_directos(
+        for sufijo in ("opciones", "poses", "verticales"):
+            try:
+                carpeta_opciones = _subruta(
                     config.cursos_dir,
-                    opciones,
-                    lambda nombre, prefijo=prefijo: (
-                        nombre.lower().startswith(prefijo)
-                        and nombre.lower().endswith(".jpg")
-                        and not _es_anterior(nombre)
-                    ),
+                    verticales,
+                    f"portadas-short-{numero}-{sufijo}",
+                )
+            except ValueError:
+                continue
+            portadas.extend(_imagenes_directas(config.cursos_dir, carpeta_opciones))
+        if opciones_compartidas != verticales:
+            portadas.extend(
+                _imagenes_directas(
+                    config.cursos_dir,
+                    opciones_compartidas,
+                    lambda nombre, prefijo=prefijo: nombre.lower().startswith(prefijo),
                 )
             )
         piezas.append(

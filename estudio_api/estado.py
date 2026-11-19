@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from estudio_api.config import Config
 from estudio_api.modelos import Avance, EstadoLeccion, EstadoRed
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 
 if TYPE_CHECKING:
@@ -14,14 +15,12 @@ if TYPE_CHECKING:
 
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_ID_GUION = re.compile(r"^[a-z0-9-]{1,40}-\d{2,3}$")
-PATRON_PREVIA = re.compile(r"^previa-v(\d+)\.mp4$", re.IGNORECASE)
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
 
 
-def publicado_por_red(
+def _piezas_previstas(
     publicacion: Publicacion | None,
-    estados: Mapping[tuple[str, str], EstadoRed],
-) -> dict[str, bool]:
+) -> dict[str, list[tuple[str, str]]]:
     previstas: dict[str, list[tuple[str, str]]] = {red: [] for red in REDES}
     if publicacion is None:
         previstas["youtube"].append(("leccion", "youtube"))
@@ -32,15 +31,62 @@ def publicado_por_red(
             for red, textos in datos.redes.items():
                 if not textos_red_vacios(textos):
                     previstas[red].append((pieza, red))
+    return previstas
 
+
+def _publicada(
+    estados: Mapping[tuple[str, str], EstadoRed], par: tuple[str, str]
+) -> bool:
+    estado = estados.get(par)
+    return estado is not None and estado.estado == "publicado"
+
+
+def publicado_por_red(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, bool]:
     return {
-        red: bool(pares)
-        and all(
-            estados.get(par) is not None and estados[par].estado == "publicado"
-            for par in pares
-        )
-        for red, pares in previstas.items()
+        red: bool(pares) and all(_publicada(estados, par) for par in pares)
+        for red, pares in _piezas_previstas(publicacion).items()
     }
+
+
+def avance_por_red(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, Avance]:
+    """Piezas publicadas de las previstas en cada red (las que tienen textos)."""
+    return {
+        red: Avance(
+            hechas=sum(_publicada(estados, par) for par in pares),
+            total=len(pares),
+        )
+        for red, pares in _piezas_previstas(publicacion).items()
+    }
+
+
+def avance_por_grupo(
+    publicacion: Publicacion | None,
+    estados: Mapping[tuple[str, str], EstadoRed],
+) -> dict[str, dict[str, Avance]]:
+    """Avance por red separando la lección completa («leccion») de reels y shorts («cortos»).
+
+    En Instagram y TikTok no va la lección, solo los cortos: así se ve qué es cada cosa.
+    """
+    previstas = _piezas_previstas(publicacion)
+    grupos: dict[str, dict[str, Avance]] = {}
+    for grupo, es_del_grupo in (
+        ("leccion", lambda pieza: pieza == "leccion"),
+        ("cortos", lambda pieza: pieza != "leccion"),
+    ):
+        grupos[grupo] = {}
+        for red, pares in previstas.items():
+            del_grupo = [par for par in pares if es_del_grupo(par[0])]
+            grupos[grupo][red] = Avance(
+                hechas=sum(_publicada(estados, par) for par in del_grupo),
+                total=len(del_grupo),
+            )
+    return grupos
 
 
 def _ruta_de_leccion(
@@ -181,7 +227,14 @@ def _ultima_previa(config: Config, carpeta: Path | None) -> str | None:
     if not versiones:
         return None
 
-    ultima = max(versiones, key=lambda version: version[0])[1]
+    ultima = max(
+        versiones,
+        key=lambda version: (
+            version[0],
+            version[1].name.casefold(),
+            version[1].name,
+        ),
+    )[1]
     relativa = ultima.relative_to(config.cursos_dir.resolve())
     segura = ruta_segura(config.cursos_dir, *relativa.parts)
     return PurePosixPath(
@@ -230,4 +283,6 @@ def calcular_estado(
         miniatura=miniatura,
         previa=_ultima_previa(config, carpeta),
         publicado=publicado_por_red(publicacion, estados_publicacion or {}),
+        publicado_avance=avance_por_red(publicacion, estados_publicacion or {}),
+        publicado_por_grupo=avance_por_grupo(publicacion, estados_publicacion or {}),
     )

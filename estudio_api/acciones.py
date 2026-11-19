@@ -14,13 +14,13 @@ from estudio_api.config import Config
 from estudio_api.entregas import PATRON_ARCHIVO_ENTREGA, listar_entregas
 from estudio_api.estado import ruta_toma_voz
 from estudio_api.lectura import (
-    PATRON_PREVIA,
     _leer_json,
     _previas,
     carpeta_de_trabajo,
     datos_curso,
 )
 from estudio_api.modelos import EstadoMontaje
+from estudio_api.previas import PATRON_PREVIA
 from estudio_api.rutas import ruta_segura
 from estudio_api.teleprompter import (
     _leer_montaje,
