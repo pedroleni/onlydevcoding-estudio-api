@@ -9,7 +9,7 @@ from typing import Any
 
 from estudio_api.config import Config
 from estudio_api.decisiones import estados, portadas_elegidas
-from estudio_api.estado import calcular_estado
+from estudio_api.estado import ContextoEstado, calcular_estado
 from estudio_api.modelos import (
     Curso,
     Escena,
@@ -139,12 +139,11 @@ def curso_en_disco(config: Config, curso: str) -> bool:
     )
 
 
-def _carpeta_desde_guion(  # noqa: PLR0911 - deuda congelada
-    config: Config,
+def _datos_carpeta_desde_guion(
     datos: dict[str, Any],
     nombre_curso: str,
     numero: int,
-) -> tuple[str, Path] | None:
+) -> tuple[PurePosixPath, re.Match[str]] | None:
     carpeta = datos.get("carpeta")
     if not isinstance(carpeta, str):
         return None
@@ -160,6 +159,19 @@ def _carpeta_desde_guion(  # noqa: PLR0911 - deuda congelada
     coincidencia = PATRON_CARPETA_LECCION.fullmatch(ruta_posix.parts[1])
     if coincidencia is None or int(coincidencia.group(1)) != numero:
         return None
+    return ruta_posix, coincidencia
+
+
+def _carpeta_desde_guion(
+    config: Config,
+    datos: dict[str, Any],
+    nombre_curso: str,
+    numero: int,
+) -> tuple[str, Path] | None:
+    datos_carpeta = _datos_carpeta_desde_guion(datos, nombre_curso, numero)
+    if datos_carpeta is None:
+        return None
+    ruta_posix, coincidencia = datos_carpeta
     try:
         ruta = ruta_segura(config.cursos_dir, *ruta_posix.parts)
     except ValueError:
@@ -366,10 +378,12 @@ def leer_lecciones(
                     numero,
                     carpeta_de_trabajo(leido, numero),
                     guion,
-                    publicacion=publicacion,
-                    estados_publicacion=estados_publicacion,
-                    miniatura=miniatura,
-                    identificador_guion=identificador_guion,
+                    ContextoEstado(
+                        publicacion=publicacion,
+                        estados_publicacion=estados_publicacion,
+                        miniatura=miniatura,
+                        identificador_guion=identificador_guion,
+                    ),
                 ),
             )
         )
@@ -879,10 +893,14 @@ def leer_leccion(
             numero,
             carpeta_de_trabajo(leido, numero),
             guion,
-            publicacion=publicacion,
-            estados_publicacion=estados_publicacion,
-            miniatura=miniatura,
-            identificador_guion=guiones[numero][3].stem if numero in guiones else None,
+            ContextoEstado(
+                publicacion=publicacion,
+                estados_publicacion=estados_publicacion,
+                miniatura=miniatura,
+                identificador_guion=(
+                    guiones[numero][3].stem if numero in guiones else None
+                ),
+            ),
         ),
         subtitulo=_texto(guion.get("subtitulo")) if guion else "",
         escenas=_escenas(guion, tiempos),

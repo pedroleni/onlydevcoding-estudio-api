@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,14 @@ if TYPE_CHECKING:
 PATRON_ID_CURSO = re.compile(r"^[a-z0-9-]{1,40}$")
 PATRON_ID_GUION = re.compile(r"^[a-z0-9-]{1,40}-\d{2,3}$")
 REDES = ("youtube", "instagram", "tiktok", "linkedin")
+
+
+@dataclass(frozen=True)
+class ContextoEstado:
+    publicacion: Publicacion | None = None
+    estados_publicacion: Mapping[tuple[str, str], EstadoRed] | None = None
+    miniatura: str | None = None
+    identificador_guion: str | None = None
 
 
 def _piezas_previstas(
@@ -260,22 +269,21 @@ def _numero_y_curso_validos(curso: str, numero: int) -> bool:
     )
 
 
-def calcular_estado(  # noqa: PLR0913 - deuda congelada
+def calcular_estado(
     config: Config,
     curso: str,
     numero: int,
     carpeta: Path | None,
     guion: dict[str, Any] | None,
-    *,
-    publicacion: Publicacion | None = None,
-    estados_publicacion: Mapping[tuple[str, str], EstadoRed] | None = None,
-    miniatura: str | None = None,
-    identificador_guion: str | None = None,
+    contexto: ContextoEstado | None = None,
 ) -> EstadoLeccion:
+    contexto = contexto or ContextoEstado()
     escenas_voz = _escenas(guion, "voz")
     escenas_camara = _escenas(guion, "camara")
+    identificador_guion = contexto.identificador_guion
     if identificador_guion is None and _numero_y_curso_validos(curso, numero):
         identificador_guion = f"{curso}-{numero:02d}"
+    estados_publicacion = contexto.estados_publicacion or {}
     return EstadoLeccion(
         guion=guion is not None,
         voz=Avance(
@@ -290,9 +298,12 @@ def calcular_estado(  # noqa: PLR0913 - deuda congelada
             total=len(escenas_camara),
         ),
         video_final=_hay_video_final(config, carpeta),
-        miniatura=miniatura,
+        miniatura=contexto.miniatura,
         previa=_ultima_previa(config, carpeta),
-        publicado=publicado_por_red(publicacion, estados_publicacion or {}),
-        publicado_avance=avance_por_red(publicacion, estados_publicacion or {}),
-        publicado_por_grupo=avance_por_grupo(publicacion, estados_publicacion or {}),
+        publicado=publicado_por_red(contexto.publicacion, estados_publicacion),
+        publicado_avance=avance_por_red(contexto.publicacion, estados_publicacion),
+        publicado_por_grupo=avance_por_grupo(
+            contexto.publicacion,
+            estados_publicacion,
+        ),
     )
