@@ -16,6 +16,7 @@ from estudio_api.lectura import (
     leer_leccion,
     leer_lecciones,
 )
+from estudio_api.reels import leer_temario
 from estudio_api.rutas_api import config_peticion
 from estudio_api.tareas import (
     DatosTipoTarea,
@@ -33,6 +34,7 @@ from estudio_api.tareas import (
     marcar_hecha,
     tareas_atrasadas,
     tareas_entre,
+    tareas_sin_fecha,
     tipos,
 )
 from estudio_api.vista_tareas import (
@@ -58,6 +60,16 @@ class EdicionTipoTarea(DatosTipoTarea):
 
 def _tipo_existe(bd: sqlite3.Connection, identificador: str) -> bool:
     return any(tipo.id == identificador for tipo in tipos(bd))
+
+
+def _en_temario(config: Config, curso: str, numero: int) -> bool:
+    try:
+        temario = leer_temario(config, curso)
+    except Exception:  # noqa: BLE001 - un temario ilegible equivale a no tenerlo.
+        return False
+    return temario is not None and any(
+        leccion.numero == numero for leccion in temario.lecciones
+    )
 
 
 def _validar_enlace(
@@ -98,7 +110,13 @@ def _validar_enlace(
     # Basta con que la lección esté en el listado, aunque solo tenga guion:
     # son justo las que aún se preparan o se graban.
     if resumen is None:
-        raise HTTPException(status_code=422, detail="La lección no existe")
+        # Una lección que solo está en el temario también se planifica, pero aún no
+        # tiene piezas a las que enlazar.
+        if not _en_temario(config, enlace.curso, enlace.numero):
+            raise HTTPException(status_code=422, detail="La lección no existe")
+        if enlace.pieza is not None:
+            raise HTTPException(status_code=422, detail="La pieza no existe")
+        return
     if enlace.pieza is None:
         return
 
@@ -174,6 +192,13 @@ def listar_tareas(
         todas = construir_vistas_tareas(config, bd, [*del_rango, *anteriores])
     corte = len(del_rango)
     return TareasDelRango(tareas=todas[:corte], atrasadas=todas[corte:])
+
+
+@router.get("/tareas/sin-fecha", response_model=list[TareaVista])
+def listar_tareas_sin_fecha(request: Request) -> list[TareaVista]:
+    config = config_peticion(request)
+    with closing(abrir_bd(config.bd_ruta)) as bd:
+        return construir_vistas_tareas(config, bd, tareas_sin_fecha(bd))
 
 
 @router.post(

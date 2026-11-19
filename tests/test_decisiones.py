@@ -126,7 +126,7 @@ def test_abrir_bd_migra_v3_conserva_trabajos_y_guarda_copia(tmp_path):
     _crear_bd_v3(ruta_bd)
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute(
             "SELECT accion, curso, numero, estado, objetivo FROM trabajo"
         ).fetchall() == [("previa-grabacion", "curso-prueba", 2, "hecho", None)]
@@ -321,7 +321,7 @@ def test_abrir_dos_veces_conserva_datos_y_esquema(tmp_path):
             "youtube",
             EstadoRed(estado="publicado", url="https://youtu.be/abc"),
         )
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         tablas = {
             fila[0]
             for fila in bd.execute(
@@ -341,7 +341,7 @@ def test_abrir_bd_vacia_crea_version_5_y_siembra_tipos_una_vez(tmp_path):
     ruta_bd = tmp_path / "estudio.sqlite3"
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute(
             "SELECT id, nombre, color, orden FROM tipo_tarea ORDER BY orden"
         ).fetchall() == [
@@ -366,7 +366,7 @@ def test_abrir_bd_migra_v1_y_conserva_sus_filas(tmp_path):
     _crear_bd_v1(ruta_bd)
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute("SELECT * FROM portada_elegida").fetchall() == [
             ("curso-prueba", 2, "leccion", "portada.jpg")
         ]
@@ -405,7 +405,7 @@ def test_abrir_bd_migra_v2_conserva_filas_y_guarda_copia(tmp_path):
     _crear_bd_v2(ruta_bd)
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute(
             "SELECT curso, numero, pieza, ruta FROM portada_elegida"
         ).fetchall() == [("curso-prueba", 2, "leccion", "portada.jpg")]
@@ -499,9 +499,9 @@ def test_dos_aperturas_simultaneas_migran_v1_una_sola_vez(tmp_path, monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as ejecutor:
         versiones = list(ejecutor.map(lambda _: abrir_y_cerrar(), range(2)))
 
-    assert versiones == [5, 5]
+    assert versiones == [6, 6]
     with closing(conectar_real(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute("SELECT COUNT(*) FROM tipo_tarea").fetchone()[0] == 5
 
 
@@ -558,18 +558,7 @@ def test_fallo_de_migracion_revierte_ddl_siembra_y_version(tmp_path, monkeypatch
         assert tablas == {"portada_elegida", "estado_red"}
 
 
-def test_abrir_bd_rechaza_version_6(tmp_path):
-    ruta_bd = tmp_path / "estudio.sqlite3"
-    with closing(sqlite3.connect(ruta_bd)) as bd:
-        bd.execute("PRAGMA user_version = 6")
-
-    with pytest.raises(
-        RuntimeError, match="Versión de la base de datos no soportada: 6"
-    ):
-        abrir_bd(ruta_bd)
-
-
-def test_abrir_bd_rechaza_version_no_soportada_y_la_conserva(tmp_path):
+def test_abrir_bd_rechaza_version_7(tmp_path):
     ruta_bd = tmp_path / "estudio.sqlite3"
     with closing(sqlite3.connect(ruta_bd)) as bd:
         bd.execute("PRAGMA user_version = 7")
@@ -579,8 +568,19 @@ def test_abrir_bd_rechaza_version_no_soportada_y_la_conserva(tmp_path):
     ):
         abrir_bd(ruta_bd)
 
+
+def test_abrir_bd_rechaza_version_no_soportada_y_la_conserva(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
     with closing(sqlite3.connect(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 7
+        bd.execute("PRAGMA user_version = 8")
+
+    with pytest.raises(
+        RuntimeError, match="Versión de la base de datos no soportada: 8"
+    ):
+        abrir_bd(ruta_bd)
+
+    with closing(sqlite3.connect(ruta_bd)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 8
 
 
 def test_abrir_bd_no_repite_ddl_si_el_esquema_ya_esta_creado(tmp_path, monkeypatch):
@@ -670,7 +670,7 @@ def test_abrir_bd_migra_v4_crea_ganchos_grabados_y_guarda_copia(tmp_path):
         )
 
     with closing(abrir_bd(ruta_bd)) as bd:
-        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
         assert bd.execute("SELECT accion FROM trabajo").fetchall() == [
             ("previa-grabacion",)
         ]
@@ -685,3 +685,50 @@ def test_abrir_bd_migra_v4_crea_ganchos_grabados_y_guarda_copia(tmp_path):
     copia = ruta_bd.with_name(f"{ruta_bd.name}.v4")
     with closing(sqlite3.connect(copia)) as bd:
         assert bd.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_abrir_bd_migra_v5_permite_tareas_sin_fecha_y_guarda_copia(tmp_path):
+    ruta_bd = tmp_path / "estudio.sqlite3"
+    _crear_bd_v3(ruta_bd)
+    # La v5 real: la v3 más objetivo, ganchos grabados y una tarea con fecha.
+    with closing(sqlite3.connect(ruta_bd)) as bd:
+        bd.executescript(
+            """
+            ALTER TABLE trabajo ADD COLUMN objetivo TEXT;
+            CREATE TABLE gancho_grabado (
+                curso TEXT NOT NULL,
+                numero INTEGER NOT NULL,
+                gancho TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                PRIMARY KEY (curso, numero, gancho)
+            );
+            INSERT INTO tarea (fecha, texto, tipo, curso, numero)
+            VALUES ('2026-11-17', 'Grabar la voz', 'grabar', 'react', 7);
+            PRAGMA user_version = 5;
+            """
+        )
+        assert bd.execute(
+            "SELECT \"notnull\" FROM pragma_table_info('tarea') WHERE name = 'fecha'"
+        ).fetchone() == (1,)
+
+    with closing(abrir_bd(ruta_bd)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert bd.execute(
+            "SELECT \"notnull\" FROM pragma_table_info('tarea') WHERE name = 'fecha'"
+        ).fetchone() == (0,)
+        assert bd.execute(
+            "SELECT id, fecha, texto, tipo, curso, numero FROM tarea"
+        ).fetchall() == [
+            (1, "2026-11-17", "Tarea ficticia", "grabar", "curso-prueba", 2),
+            (2, "2026-11-17", "Grabar la voz", "grabar", "react", 7),
+        ]
+        bd.execute("INSERT INTO tarea (texto, tipo) VALUES ('Sin día', 'grabar')")
+        assert bd.execute(
+            "SELECT id, fecha FROM tarea WHERE texto = 'Sin día'"
+        ).fetchone() == (3, None)
+        indices = {fila[1] for fila in bd.execute("PRAGMA index_list('tarea')")}
+        assert "idx_tarea_fecha" in indices
+
+    copia = ruta_bd.with_name(f"{ruta_bd.name}.v5")
+    with closing(sqlite3.connect(copia)) as bd:
+        assert bd.execute("PRAGMA user_version").fetchone()[0] == 5

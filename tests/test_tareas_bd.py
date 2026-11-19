@@ -25,6 +25,7 @@ from estudio_api.tareas import (
     marcar_hecha,
     tareas_atrasadas,
     tareas_entre,
+    tareas_sin_fecha,
     tipos,
 )
 
@@ -339,3 +340,52 @@ def test_comprobar_y_borrar_es_atomico_frente_a_otra_escritura(
         for error in [*error_borrado, *error_escritura]
     )
     assert tareas_huerfanas == []
+
+
+def test_tareas_sin_fecha_no_salen_en_los_dias_y_se_ordenan_por_leccion(tmp_path):
+    with closing(abrir_bd(tmp_path / "estudio.sqlite3")) as bd:
+        sin_curso = crear_tarea(
+            bd, TareaNueva(fecha=None, texto="Comprar micro", tipo="otro")
+        )
+        l8 = crear_tarea(
+            bd,
+            TareaNueva(
+                texto="Grabar la voz",
+                tipo="grabar",
+                enlace=EnlaceTarea(curso="react", numero=8),
+            ),
+        )
+        l7 = crear_tarea(
+            bd,
+            TareaNueva(
+                fecha=None,
+                texto="Grabar la voz",
+                tipo="grabar",
+                enlace=EnlaceTarea(curso="react", numero=7),
+            ),
+        )
+        con_dia = crear_tarea(bd, _nueva(fecha="2026-11-17"))
+
+        assert sin_curso.fecha is None
+        assert [t.id for t in tareas_sin_fecha(bd)] == [l7.id, l8.id, sin_curso.id]
+        assert [t.id for t in tareas_entre(bd, date(2000, 1, 1), date(2100, 1, 1))] == [
+            con_dia.id
+        ]
+        assert tareas_atrasadas(bd, date(2100, 1, 1)) == [con_dia]
+
+        # Asignarle día la saca de la lista; quitárselo la devuelve.
+        con_fecha = editar_tarea(
+            bd, l8.id, l8.model_copy(update={"fecha": date(2026, 11, 20)})
+        )
+        assert con_fecha is not None and con_fecha.fecha == date(2026, 11, 20)
+        assert [t.id for t in tareas_sin_fecha(bd)] == [l7.id, sin_curso.id]
+        editar_tarea(
+            bd,
+            l8.id,
+            TareaNueva(**l8.model_dump(include={"hora", "texto", "tipo", "enlace"})),
+        )
+        assert [t.id for t in tareas_sin_fecha(bd)] == [l7.id, l8.id, sin_curso.id]
+
+        # Las hechas siguen en la lista total.
+        marcar_hecha(bd, l7.id, True)
+        assert [t.hecha for t in tareas_sin_fecha(bd)] == [True, False, False]
