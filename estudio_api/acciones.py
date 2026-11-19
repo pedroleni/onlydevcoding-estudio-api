@@ -821,7 +821,10 @@ def _preparar_mejora(
     return preparar
 
 
-def _plan_alinear_voz(contexto: _Contexto) -> PlanTrabajo:
+def _plan_alinear_voz(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     return PlanTrabajo(
         accion="alinear-voz",
         objetivo=None,
@@ -838,7 +841,10 @@ def _plan_alinear_voz(contexto: _Contexto) -> PlanTrabajo:
     )
 
 
-def _plan_preparar_montaje(contexto: _Contexto) -> PlanTrabajo:
+def _plan_preparar_montaje(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     return PlanTrabajo(
         accion="preparar-montaje",
         objetivo=None,
@@ -855,7 +861,10 @@ def _plan_preparar_montaje(contexto: _Contexto) -> PlanTrabajo:
     )
 
 
-def _plan_previa_grabacion(contexto: _Contexto) -> PlanTrabajo:
+def _plan_previa_grabacion(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     rutas = rutas_previa(contexto.config, contexto.guion)
     if rutas is None:
         raise AccionNoDisponible(404, "La ruta de la previa no es válida")
@@ -873,7 +882,10 @@ def _plan_previa_grabacion(contexto: _Contexto) -> PlanTrabajo:
     )
 
 
-def _plan_render_leccion(contexto: _Contexto) -> PlanTrabajo:
+def _plan_render_leccion(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     versiones = [
         int(coincidencia.group(1))
         for nombre in _nombres_previas(contexto)
@@ -948,7 +960,10 @@ def _plan_video_final(
     )
 
 
-def _plan_preparar_shorts(contexto: _Contexto) -> PlanTrabajo:
+def _plan_preparar_shorts(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     return PlanTrabajo(
         accion="preparar-shorts",
         objetivo=None,
@@ -994,7 +1009,10 @@ def _plan_render_short(
     )
 
 
-def _plan_identificar_tomas(contexto: _Contexto) -> PlanTrabajo:
+def _plan_identificar_tomas(
+    contexto: _Contexto,
+    _opciones: OpcionesAccion,
+) -> PlanTrabajo:
     return PlanTrabajo(
         accion="identificar-tomas",
         objetivo=None,
@@ -1083,7 +1101,24 @@ def _plan_mejorar_toma(
     )
 
 
-def plan_accion(  # noqa: C901, PLR0911 - deuda congelada
+_PLANIFICADORES: dict[
+    IdAccion,
+    Callable[[_Contexto, OpcionesAccion], PlanTrabajo],
+] = {
+    "alinear-voz": _plan_alinear_voz,
+    "preparar-montaje": _plan_preparar_montaje,
+    "previa-grabacion": _plan_previa_grabacion,
+    "render-leccion": _plan_render_leccion,
+    "video-final": _plan_video_final,
+    "preparar-shorts": _plan_preparar_shorts,
+    "render-short": _plan_render_short,
+    "identificar-tomas": _plan_identificar_tomas,
+    "color-ganchos": _plan_color_ganchos,
+    "mejorar-toma": _plan_mejorar_toma,
+}
+
+
+def plan_accion(
     config: Config,
     curso: str,
     numero: int,
@@ -1100,25 +1135,7 @@ def plan_accion(  # noqa: C901, PLR0911 - deuda congelada
             evaluacion.motivo or "La acción no está disponible",
         )
     try:
-        if accion == "alinear-voz":
-            return _plan_alinear_voz(contexto)
-        if accion == "preparar-montaje":
-            return _plan_preparar_montaje(contexto)
-        if accion == "previa-grabacion":
-            return _plan_previa_grabacion(contexto)
-        if accion == "render-leccion":
-            return _plan_render_leccion(contexto)
-        if accion == "video-final":
-            return _plan_video_final(contexto, opciones)
-        if accion == "preparar-shorts":
-            return _plan_preparar_shorts(contexto)
-        if accion == "render-short":
-            return _plan_render_short(contexto, opciones)
-        if accion == "identificar-tomas":
-            return _plan_identificar_tomas(contexto)
-        if accion == "color-ganchos":
-            return _plan_color_ganchos(contexto, opciones)
-        return _plan_mejorar_toma(contexto, opciones)
+        return _PLANIFICADORES[accion](contexto, opciones)
     except ValueError as error:
         raise AccionNoDisponible(503, CARPETA_NO_PREPARABLE) from error
 

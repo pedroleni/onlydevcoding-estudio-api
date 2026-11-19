@@ -15,7 +15,11 @@ from estudio_api.decisiones import (
     fijar_estado,
 )
 from estudio_api.escritura import escribir_atomico
-from estudio_api.guia import regenerar_guia, rutas_regeneracion
+from estudio_api.guia import (
+    ParametrosRegeneracionGuia,
+    regenerar_guia,
+    rutas_regeneracion,
+)
 from estudio_api.lectura import (
     MAX_TAMANO_JSON,
     carpeta_leccion,
@@ -92,12 +96,14 @@ def _regenerar_desde_vista(
     portadas, titulos, curso_nombre = _datos_guia(config, curso, carpeta, resultado)
     return regenerar_guia(
         config,
-        carpeta,
-        numero,
-        curso_nombre,
-        publicacion,
-        portadas,
-        titulos,
+        ParametrosRegeneracionGuia(
+            carpeta=carpeta,
+            numero=numero,
+            curso_nombre=curso_nombre,
+            publicacion=publicacion,
+            portadas=portadas,
+            titulos_piezas=titulos,
+        ),
     )
 
 
